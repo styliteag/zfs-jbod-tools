@@ -488,35 +488,37 @@ map_disk_locations() {
     # Get enclosure type mapping
     local enclosure_map=$(detect_enclosure_types "$DISKS_TABLE_JSON" "$controller")
     
-    # Find all enclosures from combined disk data
-    declare -a enclosures
+    # Convert enclosure map to associative array for faster lookups
+    declare -A enclosure_types
+    while IFS= read -r line; do
+        local controller_id=$(echo "$line" | jq -r '.controller')
+        local enclosure=$(echo "$line" | jq -r '.enclosure')
+        local type=$(echo "$line" | jq -r '.type')
+        enclosure_types["${controller_id}_${enclosure}"]="$type"
+    done < <(echo "$enclosure_map" | jq -c '.Controllers[]')
+    
+    # Find all unique enclosures
+    declare -A unique_enclosures
     while IFS=$'\t' read -r dev_name name slot controller enclosure drive serial model manufacturer wwn vendor; do
-        if [ "$enclosure" != "null" ]; then
-        # If ENCLOSURE is a number then it's a JBOD
-            if [[ "$enclosure" =~ ^[0-9]+$ ]]; then
-            # Add the enclosure to the list if it's not already there
-                if [[ ! " ${enclosures[@]} " =~ " ${enclosure} " ]]; then
-                    enclosures+=("$enclosure")
-                fi
-            fi
+        if [ "$enclosure" != "null" ] && [[ "$enclosure" =~ ^[0-9]+$ ]]; then
+            unique_enclosures["$enclosure"]=1
         fi
     done <<< "$combined_disk"
     
-    # Map disks to their physical locations
+    # Convert associative array to indexed array for ordered access
+    declare -a enclosures=("${!unique_enclosures[@]}")
+    
+    # Process all disks in one pass
     local combined_disk_complete=$(echo "$combined_disk" | while IFS=$'\t' read -r dev_name name slot controller_id enclosure drive serial model manufacturer wwn vendor; do
         local enclosure_name=""
         local encslot=""
         local encdisk=""
         
-        # Try to determine enclosure type from our mapping
-        enclosure_type=$(echo "$enclosure_map" | jq -r --arg ctrl "$controller_id" --arg encl "$enclosure" \
-            '.Controllers[] | select(.controller == $ctrl and .enclosure == $encl) | .type // "Unknown"')
+        # Get enclosure type from preprocessed map
+        local enclosure_type="${enclosure_types["${controller_id}_${enclosure}"]}"
+        enclosure_type="${enclosure_type:-Unknown}"
         
-        if [ "$enclosure_type" == "null" ] || [ "$enclosure_type" == "" ]; then
-            enclosure_type="Unknown"
-        fi
-        
-    # If its the first Enclosure in the ARRAY ENCLOSURES then it's the Local
+        # Determine physical location based on enclosure position
         if [ "$enclosure" == "${enclosures[0]}" ]; then
             enclosure_name="Local"
             encslot=$((drive + 1))
@@ -537,9 +539,8 @@ map_disk_locations() {
         
         local location="$enclosure_name;SLOT:$encslot;DISK:$encdisk"
         echo -e "$dev_name\t$name\t$slot\t$controller_id\t$enclosure\t$drive\t$serial\t$model\t$manufacturer\t$wwn\t$enclosure_name\t$encslot\t$encdisk\t$location"
-done
-)
-
+    done)
+    
     echo "$combined_disk_complete"
 }
 
