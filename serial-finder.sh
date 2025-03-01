@@ -27,7 +27,6 @@ parse_arguments() {
     VERBOSE=false
     FORCE_CONTROLLER=""
     FORCE_REFRESH=false
-    CACHE_DURATION=3600  # Default to 1 hour (3600 seconds)
     
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -55,11 +54,9 @@ parse_arguments() {
                 shift 2
                 ;;
             --cache-duration=*)
-                CACHE_DURATION="${1#*=}"
                 shift
                 ;;
             -f|--force)
-                FORCE_REFRESH=true
                 shift
                 ;;
             *)
@@ -175,74 +172,9 @@ fi
     fi
 }
 
-# Function to add caching to avoid repeated expensive operations
-cache_output() {
-    local key="$1"
-    local output="$2"
-    local cache_dir="/tmp/serial-finder-cache"
-    
-    # Create cache directory if it doesn't exist
-    if ! mkdir -p "$cache_dir" 2>/dev/null; then
-        log_message "ERROR" "Failed to create cache directory $cache_dir"
-        return 1
-    fi
-    
-    local cache_file="$cache_dir/$key"
-    
-    # Log the cache operation
-    log_message "DEBUG" "Caching $key to $cache_file"
-    
-    # Write output to cache file
-    if ! echo "$output" > "$cache_file"; then
-        log_message "ERROR" "Failed to write cache file $cache_file"
-        return 1
-    fi
-    
-    log_message "DEBUG" "Successfully cached $key"
-}
-
-get_cached_output() {
-    local key="$1"
-    local cache_dir="/tmp/serial-finder-cache"
-    local cache_file="$cache_dir/$key"
-    
-    # Check if cache directory exists
-    if [ ! -d "$cache_dir" ]; then
-        log_message "DEBUG" "Cache directory $cache_dir does not exist"
-        return 1
-    fi
-    
-    # Check if cache file exists and is recent enough
-    if [ -f "$cache_file" ]; then
-        local file_age=$(($(date +%s) - $(stat -c %Y "$cache_file")))
-        if [ "$file_age" -lt "$CACHE_DURATION" ]; then
-            log_message "DEBUG" "Using valid cache for $key (age: ${file_age}s)"
-            cat "$cache_file"
-            return 0
-        else
-            log_message "DEBUG" "Cache expired for $key (age: ${file_age}s)"
-            rm -f "$cache_file"
-        fi
-    else
-        log_message "DEBUG" "No cache found for $key"
-    fi
-    
-    return 1
-}
-
 # Function to get disk information using storcli
 get_storcli_disks() {
-    # Check if we should use cache
-    if [ "$FORCE_REFRESH" = false ]; then
-        local cached_output
-        if cached_output=$(get_cached_output "storcli_disks"); then
-            log_message "INFO" "Using cached storcli disk information"
-            echo "$cached_output"
-            return
-        fi
-    fi
-    
-    log_message "INFO" "Getting fresh storcli disk information"
+    log_message "INFO" "Getting storcli disk information"
     local storcli_all_json=$(storcli /call show all J)
     
     # Parse the JSON output
@@ -262,25 +194,11 @@ get_storcli_disks() {
         } | select(.sn != null)
     ]')
     
-    # Cache the output
-    if ! cache_output "storcli_disks" "$disks_table_json"; then
-        log_message "WARNING" "Failed to cache storcli disk information"
-    fi
-    
     echo "$disks_table_json"
 }
 
 # Function to get disk information using sas2ircu
 get_sas2ircu_disks() {
-    if [ "$FORCE_REFRESH" = false ]; then
-        local cached_output
-        if cached_output=$(get_cached_output "sas2ircu_disks"); then
-            log_message "INFO" "Using cached sas2ircu disk information"
-            echo "$cached_output"
-            return
-        fi
-    fi
-    
     local disks_table=""
     local disks_table_json=""
     
@@ -316,11 +234,6 @@ get_sas2ircu_disks() {
     done
     
     local disks_table_json=$(echo "$disks_table" | jq -R -s -c 'split("\n") | map(select(length > 0) | split("\t") | {name: .[0], wwn: .[0], slot: .[1], controller: .[2], enclosure: .[3], drive: .[4], sn: .[5], model: .[6], manufacturer: .[7], sasaddr: .[8]})')
-    
-    # Cache the output
-    if ! cache_output "sas2ircu_disks" "$disks_table_json"; then
-        log_message "WARNING" "Failed to cache sas2ircu disk information"
-    fi
     
     echo "$disks_table_json"
 }
@@ -618,7 +531,6 @@ load_config() {
     
     # Default configuration
     CUSTOM_MAPPINGS="{}"
-    CACHE_DURATION=3600  # Default to 1 hour
     
     # Try user config first, then system config
     if [ -f "$config_file" ]; then
@@ -629,11 +541,6 @@ load_config() {
         source "$system_config"
     else
         log_message "DEBUG" "No configuration file found, using defaults"
-    fi
-    
-    # Override config file cache duration with command line if set
-    if [ -n "$CACHE_DURATION" ]; then
-        CACHE_DURATION=$CACHE_DURATION
     fi
 }
 
