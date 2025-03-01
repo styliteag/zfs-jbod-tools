@@ -72,10 +72,10 @@ log_message() {
                 echo "[WARNING] $message" >&2
                 ;;
             "INFO")
-                echo "[INFO] $message"
+                echo "[INFO] $message" >&2
                 ;;
             "DEBUG")
-                [ "$VERBOSE" = true ] && echo "[DEBUG] $message"
+                [ "$VERBOSE" = true ] && echo "[DEBUG] $message" >&2
                 ;;
         esac
     fi
@@ -128,7 +128,7 @@ detect_controllers() {
     local sas3ircu_found=$(check_command_exists "sas3ircu")
     
     if [ "$storcli_found" == "false" ] && [ "$sas2ircu_found" == "false" ] && [ "$sas3ircu_found" == "false" ]; then
-        echo "Error: storcli, sas2ircu, and sas3ircu could not be found. Please install one of them first." >&2
+        log_message "ERROR" "storcli, sas2ircu, and sas3ircu could not be found. Please install one of them first."
         exit 1
     fi
     
@@ -149,7 +149,7 @@ detect_controllers() {
     fi
     
     if [ "$storcli_found_controller" == "false" ] && [ "$sas2ircu_found_controller" == "false" ] && [ "$sas3ircu_found_controller" == "false" ]; then
-        echo "Error: No controller found. Please check your storcli, sas2ircu, or sas3ircu installation." >&2
+        log_message "ERROR" "No controller found. Please check your storcli, sas2ircu, or sas3ircu installation."
         exit 1
     fi
     
@@ -583,6 +583,9 @@ main() {
     
     # Check for required dependencies
     check_dependencies
+    
+    # Load configuration if available
+    load_config
     
     # Detect and select controller
     if [ -n "$FORCE_CONTROLLER" ]; then
