@@ -11,6 +11,8 @@ Options:
   -z, --zpool          Display ZFS pool information
   -v, --verbose        Enable verbose output
   -c, --controller=X   Force use of specific controller (storcli, sas2ircu, sas3ircu)
+  -f, --force          Force refresh of cached data
+  --cache-duration=N   Set cache duration in seconds (default: 3600)
 
 This script identifies physical disk locations by matching controller information with system devices.
 EOF
@@ -24,6 +26,8 @@ parse_arguments() {
     SHOW_ZPOOL=false
     VERBOSE=false
     FORCE_CONTROLLER=""
+    FORCE_REFRESH=false
+    CACHE_DURATION=3600  # Default to 1 hour (3600 seconds)
     
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -49,6 +53,14 @@ parse_arguments() {
             -c|--controller)
                 FORCE_CONTROLLER="$2"
                 shift 2
+                ;;
+            --cache-duration=*)
+                CACHE_DURATION="${1#*=}"
+                shift
+                ;;
+            -f|--force)
+                FORCE_REFRESH=true
+                shift
                 ;;
             *)
                 echo "Unknown option: $1" >&2
@@ -129,9 +141,9 @@ detect_controllers() {
     
     if [ "$storcli_found" == "false" ] && [ "$sas2ircu_found" == "false" ] && [ "$sas3ircu_found" == "false" ]; then
         log_message "ERROR" "storcli, sas2ircu, and sas3ircu could not be found. Please install one of them first."
-        exit 1
-    fi
-    
+    exit 1
+fi
+
     local storcli_found_controller="false"
     local sas2ircu_found_controller="false"
     local sas3ircu_found_controller="false"
@@ -150,9 +162,9 @@ detect_controllers() {
     
     if [ "$storcli_found_controller" == "false" ] && [ "$sas2ircu_found_controller" == "false" ] && [ "$sas3ircu_found_controller" == "false" ]; then
         log_message "ERROR" "No controller found. Please check your storcli, sas2ircu, or sas3ircu installation."
-        exit 1
-    fi
-    
+  exit 1
+fi
+
     # Select the controller to use
     if [ "$storcli_found_controller" == "true" ]; then
         echo "storcli"
@@ -168,28 +180,51 @@ cache_output() {
     local key="$1"
     local output="$2"
     local cache_dir="/tmp/serial-finder-cache"
-    local cache_file="$cache_dir/$key"
     
     # Create cache directory if it doesn't exist
-    mkdir -p "$cache_dir"
+    if ! mkdir -p "$cache_dir" 2>/dev/null; then
+        log_message "ERROR" "Failed to create cache directory $cache_dir"
+        return 1
+    fi
+    
+    local cache_file="$cache_dir/$key"
+    
+    # Log the cache operation
+    log_message "DEBUG" "Caching $key to $cache_file"
     
     # Write output to cache file
-    echo "$output" > "$cache_file"
+    if ! echo "$output" > "$cache_file"; then
+        log_message "ERROR" "Failed to write cache file $cache_file"
+        return 1
+    fi
+    
+    log_message "DEBUG" "Successfully cached $key"
 }
 
 get_cached_output() {
     local key="$1"
-    local max_age="$2" # in seconds
     local cache_dir="/tmp/serial-finder-cache"
     local cache_file="$cache_dir/$key"
+    
+    # Check if cache directory exists
+    if [ ! -d "$cache_dir" ]; then
+        log_message "DEBUG" "Cache directory $cache_dir does not exist"
+        return 1
+    fi
     
     # Check if cache file exists and is recent enough
     if [ -f "$cache_file" ]; then
         local file_age=$(($(date +%s) - $(stat -c %Y "$cache_file")))
-        if [ "$file_age" -lt "$max_age" ]; then
+        if [ "$file_age" -lt "$CACHE_DURATION" ]; then
+            log_message "DEBUG" "Using valid cache for $key (age: ${file_age}s)"
             cat "$cache_file"
             return 0
+        else
+            log_message "DEBUG" "Cache expired for $key (age: ${file_age}s)"
+            rm -f "$cache_file"
         fi
+    else
+        log_message "DEBUG" "No cache found for $key"
     fi
     
     return 1
@@ -197,15 +232,17 @@ get_cached_output() {
 
 # Function to get disk information using storcli
 get_storcli_disks() {
-    # Try to get cached output first (valid for 5 minutes)
-    local cached_output=$(get_cached_output "storcli_disks" 300)
-    if [ $? -eq 0 ]; then
-        log_message "DEBUG" "Using cached storcli disk information"
-        echo "$cached_output"
-        return
+    # Check if we should use cache
+    if [ "$FORCE_REFRESH" = false ]; then
+        local cached_output
+        if cached_output=$(get_cached_output "storcli_disks"); then
+            log_message "INFO" "Using cached storcli disk information"
+            echo "$cached_output"
+            return
+        fi
     fi
     
-    log_message "DEBUG" "Getting fresh storcli disk information"
+    log_message "INFO" "Getting fresh storcli disk information"
     local storcli_all_json=$(storcli /call show all J)
     
     # Parse the JSON output
@@ -226,13 +263,24 @@ get_storcli_disks() {
     ]')
     
     # Cache the output
-    cache_output "storcli_disks" "$disks_table_json"
+    if ! cache_output "storcli_disks" "$disks_table_json"; then
+        log_message "WARNING" "Failed to cache storcli disk information"
+    fi
     
     echo "$disks_table_json"
 }
 
 # Function to get disk information using sas2ircu
 get_sas2ircu_disks() {
+    if [ "$FORCE_REFRESH" = false ]; then
+        local cached_output
+        if cached_output=$(get_cached_output "sas2ircu_disks"); then
+            log_message "INFO" "Using cached sas2ircu disk information"
+            echo "$cached_output"
+            return
+        fi
+    fi
+    
     local disks_table=""
     local disks_table_json=""
     
@@ -243,7 +291,7 @@ get_sas2ircu_disks() {
             controller_ids+=("$line")
         fi
     done < <(sas2ircu list | awk 'c-->0;$0~s{if(b)for(c=b+1;c>1;c--)print r[(NR-c+1)%b];print;c=a}b{r[NR%b]=$0}' b=0 a=1 s="-----" | egrep -v '(-----)' | awk '{print $1}')
-    
+
     # Loop over each controller
     for controller_id in "${controller_ids[@]}"; do
         local sas2ircu_table=$(sas2ircu "$controller_id" display | awk -F: '
@@ -268,6 +316,11 @@ get_sas2ircu_disks() {
     done
     
     local disks_table_json=$(echo "$disks_table" | jq -R -s -c 'split("\n") | map(select(length > 0) | split("\t") | {name: .[0], wwn: .[0], slot: .[1], controller: .[2], enclosure: .[3], drive: .[4], sn: .[5], model: .[6], manufacturer: .[7], sasaddr: .[8]})')
+    
+    # Cache the output
+    if ! cache_output "sas2ircu_disks" "$disks_table_json"; then
+        log_message "WARNING" "Failed to cache sas2ircu disk information"
+    fi
     
     echo "$disks_table_json"
 }
@@ -313,19 +366,19 @@ combine_disk_info() {
             multipath_name=$(echo "$multipath_map" | grep "$wwn" | awk '{print $2}')
         fi
         
-        # Look for matching disk in DISKS_TABLE_JSON by serial or WWN
-        # Remove the "0x" from the WWN
+    # Look for matching disk in DISKS_TABLE_JSON by serial or WWN
+    # Remove the "0x" from the WWN
         local my_wwn=$(echo "$wwn" | sed 's/^0x//')
-        # Lowercase the WWN
+    # Lowercase the WWN
         my_wwn=$(echo "$my_wwn" | tr '[:upper:]' '[:lower:]')
         
         if [ -n "$my_wwn" ]; then
-            # Extract all values in one jq call
+        # Extract all values in one jq call
             local disk_info=$(echo "$disks_table_json" | jq -r --arg serial "$serial" --arg wwn "$my_wwn" '
-                [.[] | select(.wwn == $wwn or .sn == $serial)][0] | 
-                    "\(.name)\t\(.slot)\t\(.controller)\t\(.enclosure)\t\(.drive)\t\(.sn)\t\(.model)\t\(.manufacturer)\t\(.wwn)"
-            ')
-            # Parse the tab-delimited output
+            [.[] | select(.wwn == $wwn or .sn == $serial)][0] | 
+                "\(.name)\t\(.slot)\t\(.controller)\t\(.enclosure)\t\(.drive)\t\(.sn)\t\(.model)\t\(.manufacturer)\t\(.wwn)"
+        ')
+        # Parse the tab-delimited output
             IFS=$'\t' read -r name slot controller enclosure drive disk_serial disk_model manufacturer disk_wwn <<< "$disk_info"
             
             if [ "$drive" == "n/a" ]; then
@@ -333,9 +386,9 @@ combine_disk_info() {
             fi
             if [ "$drive" == "" ]; then
                 drive="xxx"
-            fi
-        else
-            # If no serial, set default values
+        fi
+    else
+        # If no serial, set default values
             name="None"
             slot="N/A"
             controller="N/A"
@@ -353,9 +406,9 @@ combine_disk_info() {
         else
             echo -e "$dev_name\t$wwn\t$slot\t$controller\t$enclosure\t$drive\t$serial\t$model\t$manufacturer\t$wwn\t$vendor\t-"
         fi
-    done
-    )
-    
+done
+)
+
     echo "$combined_disk"
 }
 
@@ -439,9 +492,9 @@ map_disk_locations() {
     declare -a enclosures
     while IFS=$'\t' read -r dev_name name slot controller enclosure drive serial model manufacturer wwn vendor; do
         if [ "$enclosure" != "null" ]; then
-            # If ENCLOSURE is a number then it's a JBOD
+        # If ENCLOSURE is a number then it's a JBOD
             if [[ "$enclosure" =~ ^[0-9]+$ ]]; then
-                # Add the enclosure to the list if it's not already there
+            # Add the enclosure to the list if it's not already there
                 if [[ ! " ${enclosures[@]} " =~ " ${enclosure} " ]]; then
                     enclosures+=("$enclosure")
                 fi
@@ -463,7 +516,7 @@ map_disk_locations() {
             enclosure_type="Unknown"
         fi
         
-        # If its the first Enclosure in the ARRAY ENCLOSURES then it's the Local
+    # If its the first Enclosure in the ARRAY ENCLOSURES then it's the Local
         if [ "$enclosure" == "${enclosures[0]}" ]; then
             enclosure_name="Local"
             encslot=$((drive + 1))
@@ -484,9 +537,9 @@ map_disk_locations() {
         
         local location="$enclosure_name;SLOT:$encslot;DISK:$encdisk"
         echo -e "$dev_name\t$name\t$slot\t$controller_id\t$enclosure\t$drive\t$serial\t$model\t$manufacturer\t$wwn\t$enclosure_name\t$encslot\t$encdisk\t$location"
-    done
-    )
-    
+done
+)
+
     echo "$combined_disk_complete"
 }
 
@@ -510,17 +563,17 @@ display_zpool_info() {
     
     zpool status -LP | while read line; do
         # If the line contains "/dev/" then it's a disk
-        if echo "$line" | grep -q "/dev/"; then
+  if echo "$line" | grep -q "/dev/"; then
             # Extract the device name and status from the line
             local indentation=$(echo "$line" | awk '{print substr($0, 1, index($0, $1)-1)}')
             local dev=$(echo "$line" | awk '{print $1}')
             local status=$(echo "$line" | awk '{print $2}')
             
             # If the last character is a digit, then it's a partition
-            # and we need to find the disk name
-            if echo "$dev" | grep -q -E '(p|)[0-9]+$'; then
-                dev=$(get_disk_from_partition "$dev")
-            fi
+        # and we need to find the disk name        
+        if echo "$dev" | grep -q -E '(p|)[0-9]+$'; then
+            dev=$(get_disk_from_partition "$dev")
+        fi
             
             # Find the device in our combined disk info
             local disk_serial=$(echo "$combined_disk_complete_json" | jq -r --arg dev "$dev" '.[] | select(.dev_name | contains($dev)) | .serial')
@@ -528,7 +581,7 @@ display_zpool_info() {
             local disk_enclosure=$(echo "$combined_disk_complete_json" | jq -r --arg dev "$dev" '.[] | select(.dev_name == "'$dev'") | .enclosure_name')
             local disk_location=$(echo "$combined_disk_complete_json" | jq -r --arg dev "$dev" '.[] | select(.dev_name == "'$dev'") | .location')
             
-            if [ -n "$disk_serial" ]; then
+        if [ -n "$disk_serial" ]; then
                 echo "${indentation}${dev} ${status} ${disk_location} (S/N: ${disk_serial})"
             else
                 echo "$line"
@@ -547,8 +600,8 @@ check_dependencies() {
         if ! command -v "$cmd" &> /dev/null; then
             log_message "ERROR" "Required dependency '$cmd' is not installed."
             missing_deps=true
-        fi
-    done
+  fi
+done
     
     if [ "$missing_deps" = true ]; then
         log_message "ERROR" "Please install the missing dependencies and try again."
@@ -557,12 +610,14 @@ check_dependencies() {
 }
 
 # Function to load configuration file
+# There is currently no configuration file, but it will be used in the future
 load_config() {
     local config_file="$HOME/.config/serial-finder.conf"
     local system_config="/etc/serial-finder.conf"
     
     # Default configuration
     CUSTOM_MAPPINGS="{}"
+    CACHE_DURATION=3600  # Default to 1 hour
     
     # Try user config first, then system config
     if [ -f "$config_file" ]; then
@@ -573,6 +628,11 @@ load_config() {
         source "$system_config"
     else
         log_message "DEBUG" "No configuration file found, using defaults"
+    fi
+    
+    # Override config file cache duration with command line if set
+    if [ -n "$CACHE_DURATION" ]; then
+        CACHE_DURATION=$CACHE_DURATION
     fi
 }
 
