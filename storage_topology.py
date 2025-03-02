@@ -587,11 +587,20 @@ class StorageTopology:
                     self.logger.debug(f"Comparing WWNs - System: '{my_wwn_norm}' vs Controller: '{disk_wwn_norm}'")
                     self.logger.debug(f"Comparing Serials - System: '{serial}' vs Controller: '{disk_serial}'")
                     
+                    # Determine if we should use strict WWN matching based on the controller type
+                    # For sas2ircu and sas3ircu, we need exact matches
+                    # For storcli, we can allow for off-by-one differences
+                    use_strict_matching = self.controller in ["sas2ircu", "sas3ircu"]
+                    
                     # Try to match by either WWN or serial number
-                    # For WWN, both exact match and off-by-one match (storcli can report one digit differently)
-                    if (disk_wwn_norm and (disk_wwn_norm == my_wwn_norm or 
-                                          (len(disk_wwn_norm) == len(my_wwn_norm) and 
-                                           sum(a != b for a, b in zip(disk_wwn_norm, my_wwn_norm)) <= 1))) \
+                    # For storcli, allow for off-by-one match (storcli can report one digit differently)
+                    # For sas2ircu and sas3ircu, require exact WWN match
+                    if (disk_wwn_norm and 
+                        ((use_strict_matching and disk_wwn_norm == my_wwn_norm) or
+                         (not use_strict_matching and 
+                          (disk_wwn_norm == my_wwn_norm or 
+                           (len(disk_wwn_norm) == len(my_wwn_norm) and 
+                            sum(a != b for a, b in zip(disk_wwn_norm, my_wwn_norm)) <= 1))))) \
                        or (disk_serial and disk_serial == serial):
                         self.logger.debug(f"Match found! WWN: {disk_wwn_norm} or Serial: {disk_serial}")
                         name = disk.get("name", "None")
