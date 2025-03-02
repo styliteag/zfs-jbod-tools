@@ -582,7 +582,8 @@ class StorageTopology:
                         encl_number = line.split(':')[1].strip()
                         self.logger.debug(f"Found Enclosure#: {encl_number}")
                     elif "Logical ID" in line:
-                        logical_id = line.split(':')[1].strip()
+                        # Get everything after the first colon to preserve the full logical ID
+                        logical_id = line.split(':', 1)[1].strip()
                         self.logger.debug(f"Found Logical ID: {logical_id}")
                     elif "Numslots" in line:
                         num_slots = line.split(':')[1].strip()
@@ -626,26 +627,34 @@ class StorageTopology:
         # Get enclosure type mapping
         enclosure_map = self.detect_enclosure_types(self.disks_table_json, controller)
         
-        # Create lookup dictionaries for enclosure types and logical IDs
-        enclosure_types = {}
-        enclosure_logical_ids = {}
-        enclosure_slots = {}
+        # Create lookup dictionaries for enclosure information
+        enclosure_info = {}
         
+        # Process enclosure map to create a lookup dictionary
         for encl in enclosure_map.get("Controllers", []):
             controller_id = encl.get("controller", "")
-            enclosure = encl.get("enclosure", "")
-            encl_type = encl.get("type", "Unknown")
+            enclosure_id = encl.get("enclosure", "")
             logical_id = encl.get("logicalid", "")
+            encl_type = encl.get("type", "Unknown")
             slots = encl.get("slots", "0")
+            start_slot = encl.get("start_slot", "0")
             
-            key = f"{controller_id}_{enclosure}"
-            enclosure_types[key] = encl_type
-            enclosure_logical_ids[key] = logical_id
-            enclosure_slots[key] = slots
+            # Create a key for the enclosure
+            key = f"{controller_id}_{enclosure_id}"
             
-            self.logger.debug(f"Enclosure mapping: {key} -> Type: {encl_type}, LogicalID: {logical_id}, Slots: {slots}")
+            # Store all enclosure information
+            enclosure_info[key] = {
+                "controller_id": controller_id,
+                "enclosure_id": enclosure_id,
+                "logical_id": logical_id,
+                "type": encl_type,
+                "slots": int(slots) if slots.isdigit() else 0,
+                "start_slot": int(start_slot) if start_slot.isdigit() else 0
+            }
+            
+            self.logger.debug(f"Enclosure info: {key} -> {enclosure_info[key]}")
         
-        # Find all unique enclosures
+        # Find all unique enclosures in the disk data
         unique_enclosures = set()
         for disk in combined_disk:
             enclosure = disk[4]  # Enclosure is at index 4
@@ -693,63 +702,60 @@ class StorageTopology:
             else:
                 # Get enclosure information
                 enclosure_key = f"{controller_id}_{enclosure}"
-                enclosure_type = enclosure_types.get(enclosure_key, "Unknown")
-                logical_id = enclosure_logical_ids.get(enclosure_key, "")
+                encl_info = enclosure_info.get(enclosure_key, {})
                 
-                # Check if we have a configuration entry for this enclosure's logical ID
-                config_key = None
-                config_offset = 0
+                # Get enclosure type and logical ID
+                encl_type = encl_info.get("type", "Unknown")
+                logical_id = encl_info.get("logical_id", "")
+                hw_start_slot = encl_info.get("start_slot", 0)
                 
+                # First try to find configuration by logical ID
+                config_entry = None
                 if logical_id and logical_id in self.enclosure_offsets:
-                    config_key = logical_id
-                    config_offset = self.enclosure_offsets.get(logical_id, {}).get("offset", 0)
-                    enclosure_name = self.enclosure_offsets.get(logical_id, {}).get("name", enclosure_type)
-                    self.logger.debug(f"Found enclosure config for logical ID {logical_id}: offset={config_offset}, name={enclosure_name}")
-                # Fallback to enclosure ID if logical ID is not found
+                    config_entry = self.enclosure_offsets[logical_id]
+                    self.logger.debug(f"Found config for logical ID {logical_id}: {config_entry}")
+                # Then try by enclosure ID
                 elif enclosure and enclosure in self.enclosure_offsets:
-                    config_key = enclosure
-                    config_offset = self.enclosure_offsets.get(enclosure, {}).get("offset", 0)
-                    enclosure_name = self.enclosure_offsets.get(enclosure, {}).get("name", enclosure_type)
-                    self.logger.debug(f"Found enclosure config for ID {enclosure}: offset={config_offset}, name={enclosure_name}")
+                    config_entry = self.enclosure_offsets[enclosure]
+                    self.logger.debug(f"Found config for enclosure ID {enclosure}: {config_entry}")
                 
-                # Calculate slot positions based on configuration
-                if config_key:
-                    # Use configuration-based calculation
-                    encslot = drive_num + config_offset
-                    encdisk = drive_num
-                # Fallback to default calculation based on enclosure position
-                elif enclosures and enclosure in enclosures:
-                    encl_idx = enclosures.index(enclosure)
+                # If we have a configuration entry, use it
+                if config_entry:
+                    enclosure_name = config_entry.get("name", encl_type)
+                    offset = config_entry.get("offset", 0)
+                    start_slot = config_entry.get("start_slot", hw_start_slot)
                     
-                    if not enclosure_name:
+                    # Calculate the real slot position using the offset
+                    # The real slot is the drive number plus the offset, accounting for the start slot
+                    real_drive_num = drive_num - hw_start_slot
+                    if real_drive_num < 0:
+                        real_drive_num = drive_num  # Fallback if start_slot is incorrect
+                    
+                    encslot = real_drive_num + offset + start_slot
+                    encdisk = real_drive_num + start_slot
+                    
+                    self.logger.debug(f"Calculated position for {dev_name}: drive={drive_num}, "
+                                     f"hw_start={hw_start_slot}, real_drive={real_drive_num}, "
+                                     f"offset={offset}, config_start={start_slot}, "
+                                     f"encslot={encslot}, encdisk={encdisk}")
+                else:
+                    # No configuration found, use default naming and positioning
+                    if encl_type != "Unknown":
+                        enclosure_name = encl_type
+                    elif enclosure in enclosures:
+                        encl_idx = enclosures.index(enclosure)
                         if encl_idx == 0:
                             enclosure_name = "Local"
-                        elif encl_idx == 1:
-                            enclosure_name = enclosure_type
-                        elif encl_idx == 2:
-                            enclosure_name = enclosure_type
                         else:
-                            enclosure_name = f"{enclosure_type}-{enclosure}"
-                    
-                    # Apply default offsets based on enclosure position
-                    if encl_idx == 0:
-                        encslot = drive_num + 1
-                        encdisk = drive_num
-                    elif encl_idx == 1:
-                        encslot = drive_num + 1
-                        encdisk = drive_num
-                    elif encl_idx == 2:
-                        encslot = drive_num + 31
-                        encdisk = drive_num + 30
+                            enclosure_name = f"Enclosure-{enclosure}"
                     else:
-                        encslot = drive_num + 1
-                        encdisk = drive_num
-                else:
-                    # Handle devices without enclosure information
-                    enclosure_name = f"Unknown-{enclosure}"
+                        enclosure_name = f"Unknown-{enclosure}"
+                    
+                    # Default slot calculation
                     encslot = drive_num + 1
                     encdisk = drive_num
             
+            # Create the location string
             location = f"{enclosure_name};SLOT:{encslot};DISK:{encdisk}"
             
             # Create the complete entry
@@ -851,6 +857,43 @@ class StorageTopology:
         """Load configuration file"""
         config_file = os.path.expanduser("./storage_topology.conf")
         
+        if os.path.exists(config_file):
+            try:
+                self.logger.info(f"Loading user configuration from {config_file}")
+                with open(config_file, 'r') as f:
+                    config = yaml.safe_load(f)
+                
+                if config:
+                    # Load enclosure configuration
+                    if 'enclosures' in config:
+                        for encl_config in config['enclosures']:
+                            # The key can be either the logical ID or enclosure ID
+                            encl_id = encl_config.get('logical_id', encl_config.get('id'))
+                            if encl_id:
+                                self.enclosure_offsets[encl_id] = {
+                                    'name': encl_config.get('name', 'Unknown'),
+                                    'offset': encl_config.get('offset', 0),
+                                    'start_slot': encl_config.get('start_slot', 0),
+                                    'max_slots': encl_config.get('max_slots', 0)
+                                }
+                                self.logger.debug(f"Loaded enclosure config for {encl_id}: {self.enclosure_offsets[encl_id]}")
+                    
+                    # Load custom disk mappings by serial number
+                    if 'disks' in config:
+                        for disk_config in config['disks']:
+                            serial = disk_config.get('serial')
+                            if serial:
+                                self.custom_mappings[serial] = {
+                                    'enclosure': disk_config.get('enclosure', 'Custom'),
+                                    'slot': disk_config.get('slot', 0),
+                                    'disk': disk_config.get('disk', 0)
+                                }
+                                self.logger.debug(f"Loaded custom mapping for disk {serial}: {self.custom_mappings[serial]}")
+            
+            except (yaml.YAMLError, IOError) as e:
+                self.logger.error(f"Error loading configuration file: {e}")
+        else:
+            self.logger.warning(f"Configuration file {config_file} not found. Using default settings.")
 
     def run(self) -> None:
         """Main function to run the script"""
