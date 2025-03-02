@@ -17,7 +17,7 @@ import sys
 from typing import Dict, List, Optional, Any, Tuple, Set
 
 
-class SerialFinder:
+class StorageTopology:
     """Main class for the Serial Finder tool"""
 
     def __init__(self):
@@ -872,7 +872,7 @@ class SerialFinder:
 
 if __name__ == "__main__":
     try:
-        finder = SerialFinder()
+        finder = StorageTopology()
         finder.run()
     except KeyboardInterrupt:
         print("\nOperation cancelled by user")
