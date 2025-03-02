@@ -76,6 +76,58 @@ Options:
 ]
 ```
 
+#### ZFS Pool Integration (with -z/--zpool option)
+```
+  pool: storage_pool
+ state: ONLINE
+status: Some supported and requested features are not enabled on the pool.
+        The pool can still be used, but some features are unavailable.
+action: Enable all features using 'zpool upgrade'. Once this is done,
+        the pool may no longer be accessible by software that does not support
+        the features. See zpool-features(7) for details.
+  scan: resilvered 33.0G in 01:06:08 with 0 errors on Wed Jan 15 10:57:18 2023
+config:
+
+        NAME            STATE     READ WRITE CKSUM
+        storage_pool    ONLINE       0     0     0
+          raidz2-0      ONLINE       0     0     0
+            /dev/sdad ONLINE BayRear;SLOT:27 (S/N: DISK123XX)
+            /dev/sdh ONLINE BayFront;SLOT:5 (S/N: DISK456XX)
+            /dev/sdj ONLINE BayFront;SLOT:7 (S/N: DISK789XX)
+            /dev/sdf ONLINE BayFront;SLOT:3 (S/N: DISKA12XX)
+            /dev/sdo ONLINE BayFront;SLOT:12 (S/N: DISKB34XX)
+            /dev/sdc ONLINE BayFront;SLOT:0 (S/N: DISKC56XX)
+            /dev/sdd ONLINE BayFront;SLOT:1 (S/N: DISKD78XX)
+            /dev/sdn ONLINE BayFront;SLOT:11 (S/N: DISKE90XX)
+            /dev/sdk ONLINE BayFront;SLOT:8 (S/N: DISKF12XX)
+            /dev/sdg ONLINE BayFront;SLOT:4 (S/N: DISKG34XX)
+            /dev/sdak ONLINE BayRear;SLOT:34 (S/N: DISKH56XX)
+            /dev/sdx ONLINE BayFront;SLOT:21 (S/N: DISKI78XX)
+            /dev/sdi ONLINE BayFront;SLOT:6 (S/N: DISKJ90XX)
+            /dev/sdq ONLINE BayFront;SLOT:14 (S/N: DISKK12XX)
+            /dev/sdp ONLINE BayFront;SLOT:13 (S/N: DISKL34XX)
+            /dev/sde ONLINE BayFront;SLOT:2 (S/N: DISKM56XX)
+            /dev/sds ONLINE BayFront;SLOT:16 (S/N: DISKN78XX)
+          raidz2-1      ONLINE       0     0     0
+            /dev/sdu ONLINE BayFront;SLOT:18 (S/N: DISKO90XX)
+            /dev/sdac ONLINE BayRear;SLOT:26 (S/N: DISKP12XX)
+            /dev/sdv ONLINE BayFront;SLOT:19 (S/N: DISKQ34XX)
+            /dev/sdal ONLINE BayRear;SLOT:35 (S/N: DISKR56XX)
+            /dev/sdae ONLINE BayRear;SLOT:28 (S/N: DISKS78XX)
+            /dev/sdaj ONLINE BayRear;SLOT:33 (S/N: DISKT90XX)
+            /dev/sdt ONLINE BayFront;SLOT:17 (S/N: DISKU12XX)
+            /dev/sdy ONLINE BayFront;SLOT:22 (S/N: DISKV34XX)
+            /dev/sdz ONLINE BayFront;SLOT:23 (S/N: DISKW56XX)
+            /dev/sdab ONLINE BayRear;SLOT:25 (S/N: DISKX78XX)
+            /dev/sdaa ONLINE BayRear;SLOT:24 (S/N: DISKY90XX)
+            /dev/sdaf ONLINE BayRear;SLOT:29 (S/N: DISKZ12XX)
+            /dev/sdag ONLINE BayRear;SLOT:30 (S/N: DISK1ABXX)
+            /dev/sdl ONLINE BayFront;SLOT:9 (S/N: DISK2CDXX)
+            /dev/sdah ONLINE BayRear;SLOT:31 (S/N: DISK3EFXX)
+            /dev/sdr ONLINE BayFront;SLOT:15 (S/N: DISK4GHXX)
+            /dev/sdw ONLINE BayFront;SLOT:20 (S/N: DISK5IJXX)
+```
+
 The output shows:
 - System device path (`/dev/sd*`)
 - Drive identifier (WWN or GUID)
