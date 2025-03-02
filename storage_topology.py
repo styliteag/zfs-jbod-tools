@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
 """
-Serial Finder - Identifies physical disk locations by matching controller information with system devices
+Storage Topology - Identifies physical disk locations by matching controller information with system devices
 
 This script helps identify physical disk locations by correlating storage controller information
 with system block devices. It supports storcli, sas2ircu, and sas3ircu controllers.
+
+Key Features:
+- Detects available storage controllers automatically
+- Matches physical disk locations with system devices
+- Supports JSON output for programmatic use
+- Integrates with ZFS pools
+- Handles multipath devices
+- Customizable through configuration files
 """
 
 import argparse
@@ -15,13 +23,53 @@ import shutil
 import subprocess
 import sys
 import yaml
-from typing import Dict, List, Optional, Any, Tuple, Set
+from typing import Dict, List, Optional, Any, Tuple, Set, Union
 
 
 class StorageTopology:
-    """Main class for the Serial Finder tool"""
+    """Main class for the Storage Topology tool
+    
+    This class provides functionality to identify and map physical disk locations
+    by correlating storage controller information with system block devices.
+    
+    The tool supports multiple storage controllers:
+    - LSI MegaRAID controllers via storcli
+    - LSI SAS controllers via sas2ircu (SAS2 controllers)
+    - LSI SAS controllers via sas3ircu (SAS3 controllers)
+    
+    Key features:
+    - Automatic detection of available storage controllers
+    - Matching of physical disk locations with system block devices
+    - Support for multipath devices
+    - Integration with ZFS pools to show physical locations of pool devices
+    - Customizable configuration for enclosure naming and slot mapping
+    - JSON output option for integration with other tools
+    
+    The workflow involves:
+    1. Detecting and selecting a controller
+    2. Gathering disk information from the controller
+    3. Getting system block device information
+    4. Combining and matching the information
+    5. Applying custom mappings and configuration
+    6. Displaying the results in a user-friendly format
+    
+    Attributes:
+        json_output (bool): Flag for JSON output format
+        show_zpool (bool): Flag to show ZFS pool information
+        verbose (bool): Flag for verbose logging
+        quiet (bool): Flag to suppress INFO messages
+        controller (str): Detected controller type (storcli, sas2ircu, sas3ircu)
+        disks_table_json (List[Dict]): Disk information from controller
+        lsblk_json (Dict): System block device information
+        combined_disk (List[List]): Combined disk information
+        combined_disk_complete (List[List]): Complete disk information with locations
+        enclosure_offsets (Dict): Custom enclosure configuration
+        custom_mappings (Dict): Custom disk mappings
+        logger (Logger): Application logger
+    """
 
     def __init__(self):
+        """Initialize the StorageTopology instance with default values"""
         self.json_output = False
         self.show_zpool = False
         self.verbose = False
@@ -36,15 +84,19 @@ class StorageTopology:
         self.logger = self._setup_logger()
 
     def _setup_logger(self) -> logging.Logger:
-        """Set up the logger for the application"""
+        """Set up the logger for the application
+        
+        Returns:
+            Logger: Configured logger instance
+        """
         logger = logging.getLogger("serial-finder")
         logger.setLevel(logging.INFO)
         
-        # Create console handler
+        # Create console handler with standard output format
         ch = logging.StreamHandler()
         ch.setLevel(logging.INFO)
         
-        # Create formatter
+        # Create formatter with consistent message format
         formatter = logging.Formatter('[%(levelname)s] %(message)s')
         ch.setFormatter(formatter)
         
@@ -83,25 +135,35 @@ class StorageTopology:
                 handler.setLevel(logging.WARNING)
 
     def check_command_exists(self, cmd: str) -> bool:
-        """Check if a command exists in the system PATH"""
+        """Check if a command exists in the system PATH
+        
+        Args:
+            cmd (str): Command to check
+            
+        Returns:
+            bool: True if command exists, False otherwise
+        """
         return shutil.which(cmd) is not None
 
     def check_controller_found(self, controller: str) -> bool:
-        """Check if a controller is found"""
+        """Check if a controller is found and accessible
+        
+        Args:
+            controller (str): Controller type to check (storcli, sas2ircu, sas3ircu)
+            
+        Returns:
+            bool: True if controller is found and accessible, False otherwise
+        """
         try:
             if controller == "storcli":
-                # Check if a controller is found
+                # Check controller count using storcli
                 output = subprocess.check_output(["storcli", "show", "ctrlcount"], universal_newlines=True)
                 controller_count_match = re.search(r"Controller Count = (\d+)", output)
                 if controller_count_match and int(controller_count_match.group(1)) > 0:
                     return True
-            elif controller == "sas2ircu":
-                # Check if a controller is found
-                subprocess.check_output(["sas2ircu", "LIST"], stderr=subprocess.STDOUT, universal_newlines=True)
-                return True
-            elif controller == "sas3ircu":
-                # Check if a controller is found
-                subprocess.check_output(["sas3ircu", "LIST"], stderr=subprocess.STDOUT, universal_newlines=True)
+            elif controller in ["sas2ircu", "sas3ircu"]:
+                # Check controller availability using LIST command
+                subprocess.check_output([controller, "LIST"], stderr=subprocess.STDOUT, universal_newlines=True)
                 return True
         except (subprocess.CalledProcessError, FileNotFoundError):
             pass
@@ -157,54 +219,60 @@ class StorageTopology:
         
         # Process each controller
         for controller in storcli_json.get("Controllers", []):
+            # Extract response data from the controller information
             response_data = controller.get("Response Data", {})
+            # Get the physical device information section
             physical_devices = response_data.get("Physical Device Information", {})
             
             # Find all drive keys (keys that start with "Drive /c" and don't contain "Detailed Information")
+            # This helps distinguish between basic drive entries and their detailed information
             drive_keys = [k for k in physical_devices.keys() 
                          if k.startswith("Drive /c") and "Detailed Information" not in k]
             
             for drive_key in drive_keys:
-                # Extract controller number
+                # Extract controller number from the drive key (e.g., "/c0" -> "0")
                 controller_match = re.search(r"/c(\d+)", drive_key)
                 controller_num = controller_match.group(1) if controller_match else ""
                 
-                # Get basic drive info
+                # Get basic drive info from the drive entry
                 drive_info = physical_devices[drive_key][0]
+                # Extract enclosure and slot information (format is typically "enclosure:slot")
                 enclosure_slot = drive_info.get("EID:Slt", "")
                 enclosure, slot = enclosure_slot.split(":") if ":" in enclosure_slot else ("", "")
                 
-                # Get detailed drive info
+                # Get detailed drive info from the corresponding detailed information section
                 detailed_key = f"{drive_key} - Detailed Information"
                 detailed_info = physical_devices.get(detailed_key, {})
                 
-                # Extract useful fields from detailed info
+                # Initialize variables to store disk details
                 serial = ""
                 model = ""
                 manufacturer = ""
                 wwn = ""
                 
                 # Navigate through the detailed info to find the fields
+                # The structure can be complex with nested dictionaries and lists
                 for section in detailed_info:
                     for item in section:
                         if isinstance(item, dict):
+                            # Extract key disk information from the detailed data
                             serial = item.get("SN", serial)
                             model = item.get("Model Number", model)
                             manufacturer = item.get("Manufacturer Id", manufacturer)
                             wwn = item.get("WWN", wwn)
                 
-                # Only add disks with a serial number
+                # Only add disks with a serial number to filter out non-disk devices
                 if serial:
                     disks_list.append({
-                        "name": drive_key.split(" ")[1],
-                        "slot": enclosure_slot,
-                        "controller": controller_num,
-                        "enclosure": enclosure,
-                        "drive": slot,
-                        "sn": serial,
-                        "model": model,
-                        "manufacturer": manufacturer,
-                        "wwn": wwn
+                        "name": drive_key.split(" ")[1],  # Extract the device path from the drive key
+                        "slot": enclosure_slot,           # Combined enclosure:slot format
+                        "controller": controller_num,     # Controller number
+                        "enclosure": enclosure,           # Enclosure ID
+                        "drive": slot,                    # Slot number
+                        "sn": serial,                     # Serial number
+                        "model": model,                   # Model number
+                        "manufacturer": manufacturer,     # Manufacturer
+                        "wwn": wwn                        # World Wide Name
                     })
         
         return disks_list
@@ -326,16 +394,48 @@ class StorageTopology:
         return disks_list
 
     def get_lsblk_disks(self) -> Dict[str, Any]:
-        """Get disk information from lsblk"""
+        """Get disk information from lsblk
+        
+        This method runs the lsblk command to retrieve detailed information about block devices
+        in the system. It outputs the data in JSON format for easy parsing.
+        
+        Returns:
+            Dict[str, Any]: A dictionary containing information about all block devices
+        
+        Raises:
+            subprocess.SubprocessError: If the lsblk command fails
+            json.JSONDecodeError: If the JSON output from lsblk cannot be parsed
+        """
         self.logger.info("Getting system block device information")
         
-        # Run lsblk command with JSON output
-        lsblk_output = subprocess.check_output(
-            ["lsblk", "-p", "-d", "-o", "NAME,WWN,VENDOR,MODEL,REV,SERIAL,SIZE,PTUUID,HCTL,TRAN,TYPE", "-J"],
-            universal_newlines=True
-        )
-        
-        return json.loads(lsblk_output)
+        try:
+            # Run lsblk command with JSON output
+            # -p: show full device path
+            # -d: don't show dependent devices (partitions)
+            # -o: specify output columns
+            # -J: output in JSON format
+            lsblk_output = subprocess.check_output(
+                ["lsblk", "-p", "-d", "-o", "NAME,WWN,VENDOR,MODEL,REV,SERIAL,SIZE,PTUUID,HCTL,TRAN,TYPE", "-J"],
+                universal_newlines=True
+            )
+            
+            # Parse JSON output
+            try:
+                lsblk_data = json.loads(lsblk_output)
+                self.logger.debug(f"Found {len(lsblk_data.get('blockdevices', []))} block devices")
+                return lsblk_data
+            except json.JSONDecodeError as e:
+                self.logger.error(f"Failed to parse lsblk JSON output: {e}")
+                self.logger.debug(f"Raw lsblk output: {lsblk_output}")
+                # Return empty dict structure to prevent errors downstream
+                return {"blockdevices": []}
+                
+        except subprocess.SubprocessError as e:
+            self.logger.error(f"Failed to execute lsblk command: {e}")
+            if self.verbose:
+                self.logger.debug(f"Command failed: lsblk -p -d -o NAME,WWN,VENDOR,MODEL,REV,SERIAL,SIZE,PTUUID,HCTL,TRAN,TYPE -J")
+            # Return empty dict structure to prevent errors downstream
+            return {"blockdevices": []}
 
     def detect_multipath_disks(self) -> Tuple[str, bool]:
         """Detect multipath disks and return mapping"""
@@ -620,17 +720,83 @@ class StorageTopology:
         self.logger.debug(f"Final enclosure map: {enclosure_map}")
         return enclosure_map
 
+    def _get_enclosure_config(self, logical_id: str, enclosure: str) -> Dict[str, Any]:
+        """Get the enclosure configuration from the loaded configuration
+        
+        This helper method looks up the configuration for an enclosure by either
+        its logical ID or enclosure ID.
+        
+        Args:
+            logical_id (str): The logical ID of the enclosure
+            enclosure (str): The enclosure ID
+            
+        Returns:
+            Dict[str, Any]: The configuration entry for the enclosure, or None if not found
+        """
+        # First try to find configuration by logical ID (more specific)
+        if logical_id and logical_id in self.enclosure_offsets:
+            config_entry = self.enclosure_offsets[logical_id]
+            self.logger.debug(f"Found config for logical ID {logical_id}: {config_entry}")
+            return config_entry
+        # Then try by enclosure ID (fallback)
+        elif enclosure and enclosure in self.enclosure_offsets:
+            config_entry = self.enclosure_offsets[enclosure]
+            self.logger.debug(f"Found config for enclosure ID {enclosure}: {config_entry}")
+            return config_entry
+            
+        # No configuration found
+        return None
+
+    def _calculate_disk_position(self, drive_num: int, hw_start_slot: int, 
+                                config_entry: Dict[str, Any]) -> Tuple[int, int]:
+        """Calculate the physical and logical position of a disk
+        
+        Args:
+            drive_num (int): The raw drive number from controller
+            hw_start_slot (int): The hardware start slot number
+            config_entry (Dict[str, Any]): The enclosure configuration entry
+            
+        Returns:
+            Tuple[int, int]: The physical slot number and logical disk number
+        """
+        # Get configuration values
+        offset = config_entry.get("offset", 0)
+        start_slot = config_entry.get("start_slot", hw_start_slot)
+        
+        # Calculate the real drive number by subtracting the hardware start slot
+        real_drive_num = drive_num - hw_start_slot
+        if real_drive_num < 0:
+            real_drive_num = drive_num  # Fallback if start_slot is incorrect
+        
+        # Calculate physical slot and logical disk numbers
+        physical_slot = real_drive_num + offset + start_slot
+        logical_disk = real_drive_num + start_slot
+        
+        return physical_slot, logical_disk
+
     def map_disk_locations(self, combined_disk: List[List[str]], controller: str) -> List[List[str]]:
-        """Map enclosure and disk locations"""
+        """Map enclosure and disk locations
+        
+        This method maps physical locations for each disk by combining controller 
+        information with configuration settings. It handles custom mappings and 
+        calculates the proper slot numbers.
+        
+        Args:
+            combined_disk (List[List[str]]): The combined disk information
+            controller (str): The controller type
+            
+        Returns:
+            List[List[str]]: The disk information with mapped locations
+        """
         self.logger.info("Mapping physical locations")
         
-        # Get enclosure type mapping
+        # Get enclosure type mapping by detecting the enclosure types based on controller
         enclosure_map = self.detect_enclosure_types(self.disks_table_json, controller)
         
         # Create lookup dictionaries for enclosure information
         enclosure_info = {}
         
-        # Process enclosure map to create a lookup dictionary
+        # Process enclosure map to create a lookup dictionary keyed by "controller_id_enclosure_id"
         for encl in enclosure_map.get("Controllers", []):
             controller_id = encl.get("controller", "")
             enclosure_id = encl.get("enclosure", "")
@@ -639,10 +805,10 @@ class StorageTopology:
             slots = encl.get("slots", "0")
             start_slot = encl.get("start_slot", "0")
             
-            # Create a key for the enclosure
+            # Create a key for the enclosure using controller_id and enclosure_id
             key = f"{controller_id}_{enclosure_id}"
             
-            # Store all enclosure information
+            # Store all enclosure information in a dictionary for easy lookup
             enclosure_info[key] = {
                 "controller_id": controller_id,
                 "enclosure_id": enclosure_id,
@@ -654,7 +820,7 @@ class StorageTopology:
             
             self.logger.debug(f"Enclosure info: {key} -> {enclosure_info[key]}")
         
-        # Find all unique enclosures in the disk data
+        # Find all unique enclosures in the disk data to help with naming and organization
         unique_enclosures = set()
         for disk in combined_disk:
             enclosure = disk[4]  # Enclosure is at index 4
@@ -667,32 +833,37 @@ class StorageTopology:
         
         combined_disk_complete = []
         
-        # Process all disks
+        # Process all disks to map their physical locations
         for disk in combined_disk:
-            dev_name = disk[0]
-            name = disk[1]
-            slot = disk[2]
-            controller_id = disk[3]
-            enclosure = disk[4]
-            drive = disk[5]
-            serial = disk[6]
-            model = disk[7]
-            manufacturer = disk[8]
-            wwn = disk[9]
-            vendor = disk[10]
+            # Extract disk information from the combined_disk list
+            dev_name = disk[0]      # Device name (e.g., /dev/sda)
+            name = disk[1]          # Name from controller
+            slot = disk[2]          # Slot information
+            controller_id = disk[3] # Controller ID
+            enclosure = disk[4]     # Enclosure ID
+            drive = disk[5]         # Drive/slot number
+            serial = disk[6]        # Serial number
+            model = disk[7]         # Model
+            manufacturer = disk[8]  # Manufacturer
+            wwn = disk[9]           # World Wide Name
+            vendor = disk[10]       # Vendor
             
-            enclosure_name = ""
-            encslot = 0
-            encdisk = 0
+            # Initialize location variables
+            enclosure_name = ""     # Human-readable enclosure name
+            encslot = 0             # Physical slot number
+            encdisk = 0             # Logical disk number
             
             # Skip if drive is not a valid slot number
             try:
+                # Convert drive to integer if possible, otherwise set to 0
                 drive_num = int(drive) if drive and drive not in ["null", "None", "N/A", "xxx"] else 0
             except (ValueError, TypeError):
                 drive_num = 0
             
             # Check if we have a custom mapping for this drive by serial number
+            # Custom mappings allow overriding the default location mapping
             if serial and serial in self.custom_mappings:
+                # Use the custom mapping information
                 custom_map = self.custom_mappings.get(serial, {})
                 enclosure_name = custom_map.get("enclosure", "Custom")
                 encslot = custom_map.get("slot", 0)
@@ -700,7 +871,7 @@ class StorageTopology:
                 
                 self.logger.debug(f"Using custom mapping for drive with serial {serial}: {custom_map}")
             else:
-                # Get enclosure information
+                # Get enclosure information from our lookup dictionary
                 enclosure_key = f"{controller_id}_{enclosure}"
                 encl_info = enclosure_info.get(enclosure_key, {})
                 
@@ -709,56 +880,47 @@ class StorageTopology:
                 logical_id = encl_info.get("logical_id", "")
                 hw_start_slot = encl_info.get("start_slot", 0)
                 
-                # First try to find configuration by logical ID
-                config_entry = None
-                if logical_id and logical_id in self.enclosure_offsets:
-                    config_entry = self.enclosure_offsets[logical_id]
-                    self.logger.debug(f"Found config for logical ID {logical_id}: {config_entry}")
-                # Then try by enclosure ID
-                elif enclosure and enclosure in self.enclosure_offsets:
-                    config_entry = self.enclosure_offsets[enclosure]
-                    self.logger.debug(f"Found config for enclosure ID {enclosure}: {config_entry}")
+                # Get configuration entry for this enclosure
+                config_entry = self._get_enclosure_config(logical_id, enclosure)
                 
-                # If we have a configuration entry, use it
+                # If we have a configuration entry, use it to map the disk location
                 if config_entry:
+                    # Use configured enclosure name or fallback to enclosure type
                     enclosure_name = config_entry.get("name", encl_type)
-                    offset = config_entry.get("offset", 0)
-                    start_slot = config_entry.get("start_slot", hw_start_slot)
                     
-                    # Calculate the real slot position using the offset
-                    # The real slot is the drive number plus the offset, accounting for the start slot
-                    real_drive_num = drive_num - hw_start_slot
-                    if real_drive_num < 0:
-                        real_drive_num = drive_num  # Fallback if start_slot is incorrect
-                    
-                    encslot = real_drive_num + offset + start_slot
-                    encdisk = real_drive_num + start_slot
+                    # Calculate physical slot and logical disk numbers
+                    encslot, encdisk = self._calculate_disk_position(
+                        drive_num, hw_start_slot, config_entry
+                    )
                     
                     self.logger.debug(f"Calculated position for {dev_name}: drive={drive_num}, "
-                                     f"hw_start={hw_start_slot}, real_drive={real_drive_num}, "
-                                     f"offset={offset}, config_start={start_slot}, "
+                                     f"hw_start={hw_start_slot}, "
                                      f"encslot={encslot}, encdisk={encdisk}")
                 else:
                     # No configuration found, use default naming and positioning
+                    # Determine enclosure name based on type or position
                     if encl_type != "Unknown":
+                        # Use the detected enclosure type (e.g., JBOD, Internal)
                         enclosure_name = encl_type
                     elif enclosure in enclosures:
+                        # Name based on position in the list of enclosures
                         encl_idx = enclosures.index(enclosure)
                         if encl_idx == 0:
-                            enclosure_name = "Local"
+                            enclosure_name = "Local"  # First enclosure is typically local
                         else:
-                            enclosure_name = f"Enclosure-{enclosure}"
+                            enclosure_name = f"Enclosure-{enclosure}"  # Others numbered by ID
                     else:
+                        # Fallback for unknown enclosures
                         enclosure_name = f"Unknown-{enclosure}"
                     
-                    # Default slot calculation
+                    # Default slot calculation (simple 1-based index)
                     encslot = drive_num + 1
                     encdisk = drive_num
             
-            # Create the location string
+            # Create the location string in a standardized format for output
             location = f"{enclosure_name};SLOT:{encslot};DISK:{encdisk}"
             
-            # Create the complete entry
+            # Create the complete entry with all information including the mapped location
             entry = [
                 dev_name, name, slot, controller_id, enclosure, drive,
                 serial, model, manufacturer, wwn, enclosure_name,
@@ -854,7 +1016,29 @@ class StorageTopology:
             sys.exit(1)
 
     def load_config(self) -> None:
-        """Load configuration file"""
+        """Load configuration file
+        
+        This method loads the configuration file from ./storage_topology.conf (YAML format).
+        The configuration file can contain:
+        - Enclosure definitions with names, offsets, and slot mappings
+        - Custom disk mappings by serial number
+        
+        Example config:
+        ```yaml
+        enclosures:
+          - id: "1"              # Enclosure ID or logical_id for identification
+            name: "Front JBOD"   # Human-readable name
+            offset: 0            # Offset for physical slot numbering
+            start_slot: 0        # Starting slot number for logical numbering
+            max_slots: 24        # Maximum number of slots in this enclosure
+          
+        disks:
+          - serial: "ABC123"     # Disk serial number
+            enclosure: "Top"     # Custom enclosure name
+            slot: 5              # Physical slot number
+            disk: 1              # Logical disk number
+        ```
+        """
         config_file = os.path.expanduser("./storage_topology.conf")
         
         if os.path.exists(config_file):
@@ -866,37 +1050,74 @@ class StorageTopology:
                 if config:
                     # Load enclosure configuration
                     if 'enclosures' in config:
+                        self.logger.info(f"Found {len(config['enclosures'])} enclosure configurations")
                         for encl_config in config['enclosures']:
-                            # The key can be either the logical ID or enclosure ID
+                            # Validate that we have at least an ID
                             encl_id = encl_config.get('logical_id', encl_config.get('id'))
-                            if encl_id:
-                                self.enclosure_offsets[encl_id] = {
-                                    'name': encl_config.get('name', 'Unknown'),
-                                    'offset': encl_config.get('offset', 0),
-                                    'start_slot': encl_config.get('start_slot', 0),
-                                    'max_slots': encl_config.get('max_slots', 0)
-                                }
-                                self.logger.debug(f"Loaded enclosure config for {encl_id}: {self.enclosure_offsets[encl_id]}")
+                            if not encl_id:
+                                self.logger.warning("Skipping enclosure config without ID")
+                                continue
+                                
+                            # Store the enclosure configuration
+                            self.enclosure_offsets[encl_id] = {
+                                'name': encl_config.get('name', f"Enclosure-{encl_id}"),
+                                'offset': int(encl_config.get('offset', 0)),
+                                'start_slot': int(encl_config.get('start_slot', 0)),
+                                'max_slots': int(encl_config.get('max_slots', 0))
+                            }
+                            self.logger.debug(f"Loaded enclosure config for {encl_id}: {self.enclosure_offsets[encl_id]}")
                     
                     # Load custom disk mappings by serial number
                     if 'disks' in config:
+                        self.logger.info(f"Found {len(config['disks'])} custom disk mappings")
                         for disk_config in config['disks']:
+                            # Validate that we have a serial number
                             serial = disk_config.get('serial')
-                            if serial:
-                                self.custom_mappings[serial] = {
-                                    'enclosure': disk_config.get('enclosure', 'Custom'),
-                                    'slot': disk_config.get('slot', 0),
-                                    'disk': disk_config.get('disk', 0)
-                                }
-                                self.logger.debug(f"Loaded custom mapping for disk {serial}: {self.custom_mappings[serial]}")
+                            if not serial:
+                                self.logger.warning("Skipping disk mapping without serial number")
+                                continue
+                                
+                            # Store the custom mapping
+                            self.custom_mappings[serial] = {
+                                'enclosure': disk_config.get('enclosure', 'Custom'),
+                                'slot': int(disk_config.get('slot', 0)),
+                                'disk': int(disk_config.get('disk', 0))
+                            }
+                            self.logger.debug(f"Loaded custom mapping for disk {serial}: {self.custom_mappings[serial]}")
+                else:
+                    self.logger.warning(f"Configuration file {config_file} is empty or invalid")
             
-            except (yaml.YAMLError, IOError) as e:
-                self.logger.error(f"Error loading configuration file: {e}")
+            except yaml.YAMLError as e:
+                self.logger.error(f"Error parsing YAML in configuration file: {e}")
+            except IOError as e:
+                self.logger.error(f"Error reading configuration file: {e}")
+            except Exception as e:
+                self.logger.error(f"Unexpected error loading configuration: {e}")
+                if self.verbose:
+                    import traceback
+                    traceback.print_exc()
         else:
             self.logger.warning(f"Configuration file {config_file} not found. Using default settings.")
 
     def run(self) -> None:
-        """Main function to run the script"""
+        """Main function to run the script
+        
+        This method orchestrates the entire workflow of the script:
+        
+        1. Parse command line arguments
+        2. Check for required dependencies
+        3. Load configuration file (if available)
+        4. Detect and select a storage controller
+        5. Collect disk information from the controller
+        6. Get system block device information via lsblk
+        7. Match controller devices with system devices
+        8. Map physical locations for each disk
+        9. Display results in the requested format
+        10. Optionally show ZFS pool information
+        
+        The process handles various controller types (storcli, sas2ircu, sas3ircu)
+        and works with different disk and enclosure configurations.
+        """
         # Parse command line arguments
         self.parse_arguments()
         
