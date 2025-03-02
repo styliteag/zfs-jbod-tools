@@ -238,6 +238,75 @@ get_sas2ircu_disks() {
     echo "$disks_table_json"
 }
 
+get_sas2ircu_enclosures() {
+    # Parse the output of sas2ircu 0 DISPLAY
+    
+    # Capture all lines between "Enclosure information" and the next dashed line
+    local enclosures_table=$(sas2ircu 0 display | awk '
+        /Enclosure information/ {
+            in_section = 1;
+            getline; # Skip the dashed line after "Enclosure information"
+            next;
+        }
+        /^-+$/ {
+            if (in_section) {
+                in_section = 0;
+                exit;
+            }
+        }
+        in_section {
+            print;
+        }
+    ')
+    
+    # Process enclosure information in groups of 4 lines
+    local enclosure_number=""
+    local logical_id=""
+    local numslots=""
+    local start_slot=""
+    
+    while IFS= read -r line; do
+        # Extract information based on line content
+        if [[ "$line" == *"Enclosure#"* ]]; then
+            # Start of a new enclosure, get the enclosure number
+            enclosure_number=$(echo "$line" | awk -F': ' '{print $2}' | xargs)
+        elif [[ "$line" == *"Logical ID"* ]]; then
+            # Get the logical ID
+            logical_id=$(echo "$line" | awk -F': ' '{print $2}' | xargs)
+        elif [[ "$line" == *"Numslots"* ]]; then
+            # Get the number of slots
+            numslots=$(echo "$line" | awk -F': ' '{print $2}' | xargs)
+        elif [[ "$line" == *"StartSlot"* ]]; then
+            # Get the start slot and print the complete enclosure info
+            start_slot=$(echo "$line" | awk -F': ' '{print $2}' | xargs)
+            #echo "Enclosure $enclosure_number: Logical ID=$logical_id, Slots=$numslots, StartSlot=$start_slot"
+            echo -e "$enclosure_number\t$logical_id\t$numslots\tnull\t$start_slot"
+        fi
+    done <<< "$enclosures_table"
+}
+
+get_storcli_enclosures() {
+
+    # Get enclosure information from simstorcli.sh
+    local enclosures_json=$(storcli /call/eall show all J)
+    
+    # Parse the JSON output to extract enclosure information
+    # Format: enclosure_id, product_id, num_slots, start_slot
+    echo "$enclosures_json" | jq -r '.Controllers[] | 
+        .["Response Data"] | 
+        to_entries[] | 
+        select(.key | startswith("Enclosure")) | 
+        .value | 
+        {
+            enclosure_id: (.Properties[0].EID),
+            product_id: (.["Inquiry Data"]["Product Identification"] | sub("\\s+$"; "")),
+            num_slots: (.Properties[0].Slots),
+            num_drives: (.Properties[0].PD),
+            start_slot: "0"  # Assuming start slot is always 0 for storcli
+        } | 
+        "\(.enclosure_id)\t\(.product_id)\t\(.num_slots)\t\(.num_drives)\t\(.start_slot)"'
+}
+
 # Function to get disk information from lsblk
 get_lsblk_disks() {
     local lsblk_output=$(lsblk -p -d -o NAME,WWN,VENDOR,MODEL,REV,SERIAL,SIZE,PTUUID,HCTL,TRAN,TYPE -J)
@@ -623,4 +692,5 @@ main() {
 }
 
 # Run the main function with all arguments
+
 main "$@"
