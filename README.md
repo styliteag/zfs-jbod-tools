@@ -29,6 +29,64 @@ Options:
   -f, --force          Force refresh of cached data
 ```
 
+### Example Output
+
+#### Standard Text Output
+```
+/dev/sda   0x50014ee058ffcee8  SATA_HDD  0     1     2      WD-WMAYP6774338        WDC WD5003ABYZ-011FA0  ATA           0x50014ee058ffcee8  BayFront      1        2        BayFront;SLOT:1
+/dev/sdb   0x50014ee0ae5561af  SATA_HDD  0     1     3      WD-WMAYP6774881        WDC WD5003ABYZ-011FA0  ATA           0x50014ee0ae5561af  BayFront      2        3        BayFront;SLOT:2
+/dev/sdc   0x5000cca03b02b27c  SAS_HDD   0     2     0      PBG1GZJX               HUS724040ALS640        HGST          0x5000cca03b02b27c  Front-Bay     0        0        Front-Bay;SLOT:0
+```
+
+#### JSON Output (with -j/--json option)
+```json
+[
+  {
+    "device": "/dev/sda",
+    "name": "0x50014ee058ffcee8",
+    "slot": "SATA_HDD",
+    "controller": "0",
+    "enclosure": "1",
+    "drive": "2",
+    "serial": "WD-WMAYP6776338",
+    "model": "WDC WD5003ABYZ-011FA0",
+    "manufacturer": "ATA",
+    "wwn": "0x50014ee058ffcee8",
+    "enclosure_name": "Internal",
+    "physical_slot": "102",
+    "logical_disk": "2",
+    "location": "Internal;SLOT:102;DISK:2"
+  },
+  {
+    "device": "/dev/sdb",
+    "name": "0x50014ee0ae5561af",
+    "slot": "SATA_HDD",
+    "controller": "0",
+    "enclosure": "1",
+    "drive": "3",
+    "serial": "WD-WMAYP6776881",
+    "model": "WDC WD5003ABYZ-011FA0",
+    "manufacturer": "ATA",
+    "wwn": "0x50014ee0ae5561af",
+    "enclosure_name": "Internal",
+    "physical_slot": "103",
+    "logical_disk": "3",
+    "location": "Internal;SLOT:103;DISK:3"
+  }
+]
+```
+
+The output shows:
+- System device path (`/dev/sd*`)
+- Drive identifier (WWN or GUID)
+- Drive type (SAS_HDD, SATA_HDD, etc.)
+- Controller, enclosure, and drive numbers
+- Serial number, model, and manufacturer
+- Human-readable enclosure name (from configuration)
+- Physical slot number (with any configured offset applied)
+- Logical disk number
+- Complete location string (useful for identification)
+
 ## Configuration
 
 The `storage_topology.conf` file allows customization of enclosure mappings and disk locations. It uses YAML syntax to define:
