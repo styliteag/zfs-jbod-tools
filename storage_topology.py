@@ -1255,6 +1255,24 @@ class StorageTopology:
         self.logger.info("Mapping physical locations...")
         self.combined_disk_complete = self.map_disk_locations(self.combined_disk, self.controller)
         
+        # Sort the results by enclosure name and physical slot number
+        self.logger.info("Sorting results by enclosure and slot...")
+        def get_sort_key(disk):
+            # Extract enclosure name (at index 10) and physical slot (at index 11)
+            enclosure_name = disk[10] if len(disk) > 10 else ""
+            
+            # Convert physical slot to integer for numeric sorting, with fallback to 0
+            try:
+                physical_slot = int(disk[11]) if len(disk) > 11 and disk[11].isdigit() else 0
+            except (ValueError, TypeError):
+                physical_slot = 0
+                
+            # Return tuple for sorting (enclosure first, then slot)
+            return (enclosure_name, physical_slot)
+            
+        # Sort the list in-place
+        self.combined_disk_complete.sort(key=get_sort_key)
+        
         # Display the results
         if self.json_output:
             # Output as JSON
