@@ -802,30 +802,36 @@ class StorageTopology:
         self.logger.debug(f"Final enclosure map: {enclosure_map}")
         return enclosure_map
 
-    def _get_enclosure_config(self, logical_id: str, enclosure: str) -> Dict[str, Any]:
+    def _get_enclosure_config(self, logical_id: str, enclosure: str, product_id: str = None) -> Dict[str, Any]:
         """Get the enclosure configuration from the loaded configuration
         
         This helper method looks up the configuration for an enclosure by either
-        its logical ID or enclosure ID.
+        its logical ID, enclosure ID, or product ID.
         
         Args:
             logical_id (str): The logical ID of the enclosure
             enclosure (str): The enclosure ID
+            product_id (str): The product ID of the enclosure
             
         Returns:
             Dict[str, Any]: The configuration entry for the enclosure, or None if not found
         """
-        # First try to find configuration by logical ID (more specific)
-        if logical_id and logical_id in self.enclosure_offsets:
+        # First try to find configuration by product ID (for storcli)
+        if product_id and product_id in self.enclosure_offsets:
+            config_entry = self.enclosure_offsets[product_id]
+            self.logger.debug(f"Found config for product ID {product_id}: {config_entry}")
+            return config_entry
+        # Then try by logical ID
+        elif logical_id and logical_id in self.enclosure_offsets:
             config_entry = self.enclosure_offsets[logical_id]
             self.logger.debug(f"Found config for logical ID {logical_id}: {config_entry}")
             return config_entry
-        # Then try by enclosure ID (fallback)
+        # Finally try by enclosure ID
         elif enclosure and enclosure in self.enclosure_offsets:
             config_entry = self.enclosure_offsets[enclosure]
             self.logger.debug(f"Found config for enclosure ID {enclosure}: {config_entry}")
             return config_entry
-            
+        
         # No configuration found
         return None
 
@@ -964,7 +970,7 @@ class StorageTopology:
                 hw_start_slot = encl_info.get("start_slot", 0)
                 
                 # Get configuration entry for this enclosure
-                config_entry = self._get_enclosure_config(logical_id, enclosure)
+                config_entry = self._get_enclosure_config(logical_id, enclosure, encl_type)
                 
                 # If we have a configuration entry, use it to map the disk location
                 if config_entry:
@@ -1109,17 +1115,17 @@ class StorageTopology:
         Example config:
         ```yaml
         enclosures:
-          - id: "1"              # Enclosure ID or logical_id for identification
-            name: "Front JBOD"   # Human-readable name
-            offset: 0            # Offset for physical slot numbering
-            start_slot: 0        # Starting slot number for logical numbering
-            max_slots: 24        # Maximum number of slots in this enclosure
+          - id: "SAS3x48Front"    # Enclosure ID, logical_id, or product ID for identification
+            name: "Front JBOD"    # Human-readable name
+            offset: 0             # Offset for physical slot numbering
+            start_slot: 0         # Starting slot number for logical numbering
+            max_slots: 48         # Maximum number of slots in this enclosure
           
         disks:
-          - serial: "ABC123"     # Disk serial number
-            enclosure: "Top"     # Custom enclosure name
-            slot: 5              # Physical slot number
-            disk: 1              # Logical disk number
+          - serial: "ABC123"      # Disk serial number
+            enclosure: "Top"      # Custom enclosure name
+            slot: 5               # Physical slot number
+            disk: 1               # Logical disk number
         ```
         """
         config_file = os.path.expanduser("./storage_topology.conf")
@@ -1135,8 +1141,8 @@ class StorageTopology:
                     if 'enclosures' in config:
                         self.logger.info(f"Found {len(config['enclosures'])} enclosure configurations")
                         for encl_config in config['enclosures']:
-                            # Validate that we have at least an ID
-                            encl_id = encl_config.get('logical_id', encl_config.get('id'))
+                            # Validate that we have an ID
+                            encl_id = encl_config.get('id')
                             if not encl_id:
                                 self.logger.warning("Skipping enclosure config without ID")
                                 continue
@@ -1278,8 +1284,6 @@ class StorageTopology:
             
             # Print header
             header_line = "  ".join(h.ljust(widths[i]) for i, h in enumerate(headers) if i < len(widths))
-            print(header_line)
-            print("-" * len(header_line))
             
             # Print data
             for disk in self.combined_disk_complete:
