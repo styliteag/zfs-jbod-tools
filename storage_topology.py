@@ -157,7 +157,17 @@ class StorageTopology:
         try:
             if controller == "storcli":
                 # Check controller count using storcli
-                output = subprocess.check_output(["storcli", "show", "ctrlcount"], universal_newlines=True)
+                # Use binary mode and handle decoding separately with error handling
+                output_bytes = subprocess.check_output(["storcli", "show", "ctrlcount"])
+                
+                # Try to decode with error handling
+                try:
+                    output = output_bytes.decode('utf-8')
+                except UnicodeDecodeError:
+                    # If UTF-8 decoding fails, try with 'latin-1' which can handle any byte value
+                    self.logger.debug("UTF-8 decoding failed for controller check, falling back to latin-1")
+                    output = output_bytes.decode('latin-1')
+                
                 controller_count_match = re.search(r"Controller Count = (\d+)", output)
                 if controller_count_match and int(controller_count_match.group(1)) > 0:
                     return True
@@ -211,103 +221,120 @@ class StorageTopology:
         """Get disk information using storcli"""
         self.logger.info("Getting storcli disk information")
         
-        # Run storcli command to get all disk information in JSON format
-        storcli_output = subprocess.check_output(["storcli", "/call", "show", "all", "J"], universal_newlines=True)
-        storcli_json = json.loads(storcli_output)
-        
-        self.logger.debug(f"Got storcli output, controllers: {len(storcli_json.get('Controllers', []))}")
-        
-        disks_list = []
-        
-        # Process each controller
-        for controller_idx, controller in enumerate(storcli_json.get("Controllers", [])):
-            # Extract response data from the controller information
-            response_data = controller.get("Response Data", {})
+        try:
+            # Run storcli command to get all disk information in JSON format
+            # Use binary mode and handle decoding separately with error handling
+            storcli_output_bytes = subprocess.check_output(["storcli", "/call", "show", "all", "J"])
             
-            self.logger.debug(f"Controller {controller_idx} response data keys: {list(response_data.keys())}")
+            # Try to decode with error handling
+            try:
+                storcli_output = storcli_output_bytes.decode('utf-8')
+            except UnicodeDecodeError:
+                # If UTF-8 decoding fails, try with 'latin-1' which can handle any byte value
+                self.logger.debug("UTF-8 decoding failed, falling back to latin-1")
+                storcli_output = storcli_output_bytes.decode('latin-1')
             
-            # Get the physical device information section
-            physical_devices = response_data.get("Physical Device Information", {})
+            storcli_json = json.loads(storcli_output)
             
-            if physical_devices:
-                self.logger.debug(f"Physical Device Information keys: {list(physical_devices.keys())}")
+            self.logger.debug(f"Got storcli output, controllers: {len(storcli_json.get('Controllers', []))}")
+            
+            disks_list = []
+            
+            # Process each controller
+            for controller_idx, controller in enumerate(storcli_json.get("Controllers", [])):
+                # Extract response data from the controller information
+                response_data = controller.get("Response Data", {})
                 
-                # Find all drive keys (keys that start with "Drive /c" and don't contain "Detailed Information")
-                drive_keys = [k for k in physical_devices.keys() 
-                             if k.startswith("Drive /c") and "Detailed Information" not in k]
+                self.logger.debug(f"Controller {controller_idx} response data keys: {list(response_data.keys())}")
                 
-                self.logger.debug(f"Found drive keys: {drive_keys}")
+                # Get the physical device information section
+                physical_devices = response_data.get("Physical Device Information", {})
                 
-                for drive_key in drive_keys:
-                    # Extract controller number from the drive key (e.g., "/c0" -> "0")
-                    controller_match = re.search(r"/c(\d+)", drive_key)
-                    controller_num = controller_match.group(1) if controller_match else ""
+                if physical_devices:
+                    self.logger.debug(f"Physical Device Information keys: {list(physical_devices.keys())}")
                     
-                    # Also extract enclosure and slot numbers
-                    enclosure_slot_match = re.search(r"/e(\d+)/s(\d+)", drive_key)
-                    if enclosure_slot_match:
-                        enclosure = enclosure_slot_match.group(1)
-                        slot = enclosure_slot_match.group(2)
-                    else:
-                        # Fallback to using the EID:Slt field
+                    # Find all drive keys (keys that start with "Drive /c" and don't contain "Detailed Information")
+                    drive_keys = [k for k in physical_devices.keys() 
+                                 if k.startswith("Drive /c") and "Detailed Information" not in k]
+                    
+                    self.logger.debug(f"Found drive keys: {drive_keys}")
+                    
+                    for drive_key in drive_keys:
+                        # Extract controller number from the drive key (e.g., "/c0" -> "0")
+                        controller_match = re.search(r"/c(\d+)", drive_key)
+                        controller_num = controller_match.group(1) if controller_match else ""
+                        
+                        # Also extract enclosure and slot numbers
+                        enclosure_slot_match = re.search(r"/e(\d+)/s(\d+)", drive_key)
+                        if enclosure_slot_match:
+                            enclosure = enclosure_slot_match.group(1)
+                            slot = enclosure_slot_match.group(2)
+                        else:
+                            # Fallback to using the EID:Slt field
+                            try:
+                                drive_info = physical_devices[drive_key][0]
+                                enclosure_slot = drive_info.get("EID:Slt", "")
+                                enclosure, slot = enclosure_slot.split(":") if ":" in enclosure_slot else ("", "")
+                            except (IndexError, KeyError):
+                                self.logger.debug(f"Could not extract EID:Slt for drive {drive_key}")
+                                enclosure = ""
+                                slot = ""
+                        
+                        # Get basic drive info from the drive key entry
                         try:
-                            drive_info = physical_devices[drive_key][0]
-                            enclosure_slot = drive_info.get("EID:Slt", "")
-                            enclosure, slot = enclosure_slot.split(":") if ":" in enclosure_slot else ("", "")
+                            basic_drive_info = physical_devices[drive_key][0]
+                            model = basic_drive_info.get("Model", "")
                         except (IndexError, KeyError):
-                            self.logger.debug(f"Could not extract EID:Slt for drive {drive_key}")
-                            enclosure = ""
-                            slot = ""
-                    
-                    # Get basic drive info from the drive key entry
-                    try:
-                        basic_drive_info = physical_devices[drive_key][0]
-                        model = basic_drive_info.get("Model", "")
-                    except (IndexError, KeyError):
-                        self.logger.debug(f"Could not extract basic info for drive {drive_key}")
-                        model = ""
-                    
-                    # Get detailed drive info from the corresponding detailed information section
-                    detailed_key = f"{drive_key} - Detailed Information"
-                    detailed_info = physical_devices.get(detailed_key, {})
-                    
-                    # Initialize variables to store disk details
-                    serial = ""
-                    manufacturer = ""
-                    wwn = ""
-                    
-                    # The detailed info is structured with nested sections
-                    # Look for the "Device attributes" section which contains the serial, manufacturer, and WWN
-                    device_attributes_key = f"{drive_key} Device attributes"
-                    if device_attributes_key in detailed_info:
-                        device_attributes = detailed_info[device_attributes_key]
-                        serial = device_attributes.get("SN", "")
-                        manufacturer = device_attributes.get("Manufacturer Id", "")
-                        wwn = device_attributes.get("WWN", "")
-                        # If model wasn't found in basic info, try to get it from detailed info
-                        if not model:
-                            model = device_attributes.get("Model Number", "")
-                    
-                    self.logger.debug(f"Drive {drive_key} details - SN: {serial}, Model: {model}, WWN: {wwn}")
-                    
-                    # Only add disks with a serial number to filter out non-disk devices
-                    if serial:
-                        disk_entry = {
-                            "name": drive_key,                   # Full drive path 
-                            "slot": f"{enclosure}:{slot}",       # Combined enclosure:slot format
-                            "controller": controller_num,        # Controller number
-                            "enclosure": enclosure,              # Enclosure ID
-                            "drive": slot,                       # Slot number
-                            "sn": serial,                        # Serial number
-                            "model": model,                      # Model number
-                            "manufacturer": manufacturer,        # Manufacturer
-                            "wwn": wwn                           # World Wide Name
-                        }
-                        disks_list.append(disk_entry)
-                        self.logger.debug(f"Found storcli disk: {disk_entry}")
-        
-        self.logger.debug(f"Total storcli disks found: {len(disks_list)}")
-        return disks_list
+                            self.logger.debug(f"Could not extract basic info for drive {drive_key}")
+                            model = ""
+                        
+                        # Get detailed drive info from the corresponding detailed information section
+                        detailed_key = f"{drive_key} - Detailed Information"
+                        detailed_info = physical_devices.get(detailed_key, {})
+                        
+                        # Initialize variables to store disk details
+                        serial = ""
+                        manufacturer = ""
+                        wwn = ""
+                        
+                        # The detailed info is structured with nested sections
+                        # Look for the "Device attributes" section which contains the serial, manufacturer, and WWN
+                        device_attributes_key = f"{drive_key} Device attributes"
+                        if device_attributes_key in detailed_info:
+                            device_attributes = detailed_info[device_attributes_key]
+                            serial = device_attributes.get("SN", "")
+                            manufacturer = device_attributes.get("Manufacturer Id", "")
+                            wwn = device_attributes.get("WWN", "")
+                            # If model wasn't found in basic info, try to get it from detailed info
+                            if not model:
+                                model = device_attributes.get("Model Number", "")
+                        
+                        self.logger.debug(f"Drive {drive_key} details - SN: {serial}, Model: {model}, WWN: {wwn}")
+                        
+                        # Only add disks with a serial number to filter out non-disk devices
+                        if serial:
+                            disk_entry = {
+                                "name": drive_key,                   # Full drive path 
+                                "slot": f"{enclosure}:{slot}",       # Combined enclosure:slot format
+                                "controller": controller_num,        # Controller number
+                                "enclosure": enclosure,              # Enclosure ID
+                                "drive": slot,                       # Slot number
+                                "sn": serial,                        # Serial number
+                                "model": model,                      # Model number
+                                "manufacturer": manufacturer,        # Manufacturer
+                                "wwn": wwn                           # World Wide Name
+                            }
+                            disks_list.append(disk_entry)
+                            self.logger.debug(f"Found storcli disk: {disk_entry}")
+            
+            self.logger.debug(f"Total storcli disks found: {len(disks_list)}")
+            return disks_list
+        except Exception as e:
+            self.logger.error(f"Error getting storcli disk information: {e}")
+            if self.verbose:
+                import traceback
+                traceback.print_exc()
+            return []
 
     def get_sas2ircu_disks(self) -> List[Dict[str, Any]]:
         """Get disk information using sas2ircu"""
@@ -627,10 +654,19 @@ class StorageTopology:
         
         try:
             # Get enclosure information
-            enclosure_info_output = subprocess.check_output(
-                ["storcli", "/call/eall", "show", "all", "J"],
-                universal_newlines=True
+            # Use binary mode and handle decoding separately with error handling
+            enclosure_info_bytes = subprocess.check_output(
+                ["storcli", "/call/eall", "show", "all", "J"]
             )
+            
+            # Try to decode with error handling
+            try:
+                enclosure_info_output = enclosure_info_bytes.decode('utf-8')
+            except UnicodeDecodeError:
+                # If UTF-8 decoding fails, try with 'latin-1' which can handle any byte value
+                self.logger.debug("UTF-8 decoding failed for enclosure info, falling back to latin-1")
+                enclosure_info_output = enclosure_info_bytes.decode('latin-1')
+                
             enclosure_info = json.loads(enclosure_info_output)
             
             # Process each controller
