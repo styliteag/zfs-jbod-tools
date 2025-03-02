@@ -215,66 +215,98 @@ class StorageTopology:
         storcli_output = subprocess.check_output(["storcli", "/call", "show", "all", "J"], universal_newlines=True)
         storcli_json = json.loads(storcli_output)
         
+        self.logger.debug(f"Got storcli output, controllers: {len(storcli_json.get('Controllers', []))}")
+        
         disks_list = []
         
         # Process each controller
-        for controller in storcli_json.get("Controllers", []):
+        for controller_idx, controller in enumerate(storcli_json.get("Controllers", [])):
             # Extract response data from the controller information
             response_data = controller.get("Response Data", {})
+            
+            self.logger.debug(f"Controller {controller_idx} response data keys: {list(response_data.keys())}")
+            
             # Get the physical device information section
             physical_devices = response_data.get("Physical Device Information", {})
             
-            # Find all drive keys (keys that start with "Drive /c" and don't contain "Detailed Information")
-            # This helps distinguish between basic drive entries and their detailed information
-            drive_keys = [k for k in physical_devices.keys() 
-                         if k.startswith("Drive /c") and "Detailed Information" not in k]
-            
-            for drive_key in drive_keys:
-                # Extract controller number from the drive key (e.g., "/c0" -> "0")
-                controller_match = re.search(r"/c(\d+)", drive_key)
-                controller_num = controller_match.group(1) if controller_match else ""
+            if physical_devices:
+                self.logger.debug(f"Physical Device Information keys: {list(physical_devices.keys())}")
                 
-                # Get basic drive info from the drive entry
-                drive_info = physical_devices[drive_key][0]
-                # Extract enclosure and slot information (format is typically "enclosure:slot")
-                enclosure_slot = drive_info.get("EID:Slt", "")
-                enclosure, slot = enclosure_slot.split(":") if ":" in enclosure_slot else ("", "")
+                # Find all drive keys (keys that start with "Drive /c" and don't contain "Detailed Information")
+                drive_keys = [k for k in physical_devices.keys() 
+                             if k.startswith("Drive /c") and "Detailed Information" not in k]
                 
-                # Get detailed drive info from the corresponding detailed information section
-                detailed_key = f"{drive_key} - Detailed Information"
-                detailed_info = physical_devices.get(detailed_key, {})
+                self.logger.debug(f"Found drive keys: {drive_keys}")
                 
-                # Initialize variables to store disk details
-                serial = ""
-                model = ""
-                manufacturer = ""
-                wwn = ""
-                
-                # Navigate through the detailed info to find the fields
-                # The structure can be complex with nested dictionaries and lists
-                for section in detailed_info:
-                    for item in section:
-                        if isinstance(item, dict):
-                            # Extract key disk information from the detailed data
-                            serial = item.get("SN", serial)
-                            model = item.get("Model Number", model)
-                            manufacturer = item.get("Manufacturer Id", manufacturer)
-                            wwn = item.get("WWN", wwn)
-                
-                # Only add disks with a serial number to filter out non-disk devices
-                if serial:
-                    disks_list.append({
-                        "name": drive_key.split(" ")[1],  # Extract the device path from the drive key
-                        "slot": enclosure_slot,           # Combined enclosure:slot format
-                        "controller": controller_num,     # Controller number
-                        "enclosure": enclosure,           # Enclosure ID
-                        "drive": slot,                    # Slot number
-                        "sn": serial,                     # Serial number
-                        "model": model,                   # Model number
-                        "manufacturer": manufacturer,     # Manufacturer
-                        "wwn": wwn                        # World Wide Name
-                    })
+                for drive_key in drive_keys:
+                    # Extract controller number from the drive key (e.g., "/c0" -> "0")
+                    controller_match = re.search(r"/c(\d+)", drive_key)
+                    controller_num = controller_match.group(1) if controller_match else ""
+                    
+                    # Also extract enclosure and slot numbers
+                    enclosure_slot_match = re.search(r"/e(\d+)/s(\d+)", drive_key)
+                    if enclosure_slot_match:
+                        enclosure = enclosure_slot_match.group(1)
+                        slot = enclosure_slot_match.group(2)
+                    else:
+                        # Fallback to using the EID:Slt field
+                        try:
+                            drive_info = physical_devices[drive_key][0]
+                            enclosure_slot = drive_info.get("EID:Slt", "")
+                            enclosure, slot = enclosure_slot.split(":") if ":" in enclosure_slot else ("", "")
+                        except (IndexError, KeyError):
+                            self.logger.debug(f"Could not extract EID:Slt for drive {drive_key}")
+                            enclosure = ""
+                            slot = ""
+                    
+                    # Get basic drive info from the drive key entry
+                    try:
+                        basic_drive_info = physical_devices[drive_key][0]
+                        model = basic_drive_info.get("Model", "")
+                    except (IndexError, KeyError):
+                        self.logger.debug(f"Could not extract basic info for drive {drive_key}")
+                        model = ""
+                    
+                    # Get detailed drive info from the corresponding detailed information section
+                    detailed_key = f"{drive_key} - Detailed Information"
+                    detailed_info = physical_devices.get(detailed_key, {})
+                    
+                    # Initialize variables to store disk details
+                    serial = ""
+                    manufacturer = ""
+                    wwn = ""
+                    
+                    # The detailed info is structured with nested sections
+                    # Look for the "Device attributes" section which contains the serial, manufacturer, and WWN
+                    device_attributes_key = f"{drive_key} Device attributes"
+                    if device_attributes_key in detailed_info:
+                        device_attributes = detailed_info[device_attributes_key]
+                        serial = device_attributes.get("SN", "")
+                        manufacturer = device_attributes.get("Manufacturer Id", "")
+                        wwn = device_attributes.get("WWN", "")
+                        # If model wasn't found in basic info, try to get it from detailed info
+                        if not model:
+                            model = device_attributes.get("Model Number", "")
+                    
+                    self.logger.debug(f"Drive {drive_key} details - SN: {serial}, Model: {model}, WWN: {wwn}")
+                    
+                    # Only add disks with a serial number to filter out non-disk devices
+                    if serial:
+                        disk_entry = {
+                            "name": drive_key,                   # Full drive path 
+                            "slot": f"{enclosure}:{slot}",       # Combined enclosure:slot format
+                            "controller": controller_num,        # Controller number
+                            "enclosure": enclosure,              # Enclosure ID
+                            "drive": slot,                       # Slot number
+                            "sn": serial,                        # Serial number
+                            "model": model,                      # Model number
+                            "manufacturer": manufacturer,        # Manufacturer
+                            "wwn": wwn                           # World Wide Name
+                        }
+                        disks_list.append(disk_entry)
+                        self.logger.debug(f"Found storcli disk: {disk_entry}")
         
+        self.logger.debug(f"Total storcli disks found: {len(disks_list)}")
         return disks_list
 
     def get_sas2ircu_disks(self) -> List[Dict[str, Any]]:
@@ -516,11 +548,25 @@ class StorageTopology:
             if my_wwn:
                 for disk in disks_table_json:
                     # Compare wwn or serial
-                    disk_wwn_lower = str(disk.get("wwn", "")).lower()
+                    disk_wwn = str(disk.get("wwn", ""))
+                    disk_wwn_lower = disk_wwn.lower()
                     disk_serial = str(disk.get("sn", ""))
                     
+                    # Normalize WWNs by removing any "0x" prefix and ensuring consistent case
+                    my_wwn_norm = my_wwn.replace("0x", "").lower()
+                    disk_wwn_norm = disk_wwn_lower.replace("0x", "").lower()
+                    
+                    # Debug logging for WWN matching
+                    self.logger.debug(f"Comparing WWNs - System: '{my_wwn_norm}' vs Controller: '{disk_wwn_norm}'")
+                    self.logger.debug(f"Comparing Serials - System: '{serial}' vs Controller: '{disk_serial}'")
+                    
                     # Try to match by either WWN or serial number
-                    if (disk_wwn_lower and disk_wwn_lower == my_wwn) or (disk_serial and disk_serial == serial):
+                    # For WWN, both exact match and off-by-one match (storcli can report one digit differently)
+                    if (disk_wwn_norm and (disk_wwn_norm == my_wwn_norm or 
+                                          (len(disk_wwn_norm) == len(my_wwn_norm) and 
+                                           sum(a != b for a, b in zip(disk_wwn_norm, my_wwn_norm)) <= 1))) \
+                       or (disk_serial and disk_serial == serial):
+                        self.logger.debug(f"Match found! WWN: {disk_wwn_norm} or Serial: {disk_serial}")
                         name = disk.get("name", "None")
                         slot = disk.get("slot", "N/A")
                         controller = disk.get("controller", "N/A")
@@ -814,8 +860,8 @@ class StorageTopology:
                 "enclosure_id": enclosure_id,
                 "logical_id": logical_id,
                 "type": encl_type,
-                "slots": int(slots) if slots.isdigit() else 0,
-                "start_slot": int(start_slot) if start_slot.isdigit() else 0
+                "slots": int(slots) if isinstance(slots, str) and slots.isdigit() else (slots if isinstance(slots, int) else 0),
+                "start_slot": int(start_slot) if isinstance(start_slot, str) and start_slot.isdigit() else (start_slot if isinstance(start_slot, int) else 0)
             }
             
             self.logger.debug(f"Enclosure info: {key} -> {enclosure_info[key]}")
@@ -824,7 +870,8 @@ class StorageTopology:
         unique_enclosures = set()
         for disk in combined_disk:
             enclosure = disk[4]  # Enclosure is at index 4
-            if enclosure and enclosure != "null" and enclosure != "N/A" and enclosure.isdigit():
+            # Make sure enclosure is a string before calling isdigit()
+            if enclosure and enclosure != "null" and enclosure != "N/A" and str(enclosure).isdigit():
                 unique_enclosures.add(enclosure)
         
         # Convert to sorted list for ordered access
