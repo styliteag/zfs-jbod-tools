@@ -559,16 +559,16 @@ class StorageTopology:
             # Remove the "0x" from the WWN and convert to lowercase
             my_wwn = wwn.replace("0x", "").lower() if wwn else ""
             
-            # Default values if no match is found
-            name = "None"
-            slot = "N/A"
-            controller = "N/A"
-            enclosure = "N/A"
-            drive = "None"
-            disk_serial = "N/A"
-            disk_model = "N/A"
-            manufacturer = "N/A"
-            disk_wwn = "N/A"
+            # Default values if no match is found - use "null" consistently
+            name = "null"
+            slot = "null"
+            controller = "null"
+            enclosure = "null"
+            drive = "null"
+            disk_serial = "null"
+            disk_model = "null"
+            manufacturer = "null"
+            disk_wwn = "null"
             
             # Find matching disk
             disk_found = False
@@ -603,37 +603,32 @@ class StorageTopology:
                             sum(a != b for a, b in zip(disk_wwn_norm, my_wwn_norm)) <= 1))))) \
                        or (disk_serial and disk_serial == serial):
                         self.logger.debug(f"Match found! WWN: {disk_wwn_norm} or Serial: {disk_serial}")
-                        name = disk.get("name", "None")
-                        slot = disk.get("slot", "N/A")
-                        controller = disk.get("controller", "N/A")
-                        enclosure = disk.get("enclosure", "N/A")
-                        drive = disk.get("drive", "None")
-                        disk_serial = disk.get("sn", "N/A")
-                        disk_model = disk.get("model", "N/A")
-                        manufacturer = disk.get("manufacturer", "N/A")
-                        disk_wwn = disk.get("wwn", "N/A")
+                        name = disk.get("name", "null")
+                        slot = disk.get("slot", "null")
+                        controller = disk.get("controller", "null")
+                        enclosure = disk.get("enclosure", "null")
+                        drive = disk.get("drive", "null")
+                        disk_serial = disk.get("sn", "null")
+                        disk_model = disk.get("model", "null") 
+                        manufacturer = disk.get("manufacturer", "null")
+                        disk_wwn = disk.get("wwn", "null")
                         disk_found = True
                         break
             
             # Handle special cases
-            if drive == "n/a":
-                drive = vendor
+            if drive == "null":
+                drive = vendor if vendor else "null"
             if not drive:
-                drive = "xxx"
+                drive = "null"
             
             # For devices that weren't matched with controller info
             if not disk_found:
-                # For ZD devices, add them with null values
-                if "zd" in dev_name:
-                    wwn = "null"
-                    slot = "null"
-                    controller = "null"
-                    enclosure = "null"
-                    drive = "null"
-                    serial = "null" if not serial else serial
-                    model = "null" if not model else model
-                    manufacturer = "null" if not manufacturer else manufacturer
-                    vendor = "null" if not vendor else vendor
+                # Use existing values if available, otherwise "null"
+                wwn = wwn if wwn else "null"
+                serial = serial if serial else "null"
+                model = model if model else "null"
+                manufacturer = manufacturer if manufacturer else "null"
+                vendor = vendor if vendor else "null"
             
             # Create the combined entry
             entry = [
@@ -1311,6 +1306,7 @@ class StorageTopology:
             
             # Print header
             header_line = "  ".join(h.ljust(widths[i]) for i, h in enumerate(headers) if i < len(widths))
+            print(header_line)
             
             # Print data
             for disk in self.combined_disk_complete:
