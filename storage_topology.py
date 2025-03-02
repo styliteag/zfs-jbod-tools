@@ -1016,8 +1016,8 @@ class StorageTopology:
                     encdisk = drive_num
             
             # Create the location string in a standardized format for output
-            location = f"{enclosure_name};SLOT:{encslot};DISK:{encdisk}"
-            
+            #location = f"{enclosure_name};SLOT:{encslot};DISK:{encdisk}"
+            location = f"{enclosure_name};SLOT:{encslot}"
             # Create the complete entry with all information including the mapped location
             entry = [
                 dev_name, name, slot, controller_id, enclosure, drive,
