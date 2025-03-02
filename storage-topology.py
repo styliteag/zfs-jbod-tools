@@ -24,9 +24,7 @@ class SerialFinder:
         self.json_output = False
         self.show_zpool = False
         self.verbose = False
-        self.force_controller = ""
-        self.force_refresh = False
-        self.cache_duration = 3600
+        self.quiet = False
         self.controller = ""
         self.disks_table_json = {}
         self.lsblk_json = {}
@@ -61,16 +59,7 @@ class SerialFinder:
         parser.add_argument("-j", "--json", action="store_true", help="Output results in JSON format")
         parser.add_argument("-z", "--zpool", action="store_true", help="Display ZFS pool information")
         parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
-        parser.add_argument(
-            "-c", "--controller", 
-            choices=["storcli", "sas2ircu", "sas3ircu"],
-            help="Force use of specific controller"
-        )
-        parser.add_argument("-f", "--force", action="store_true", help="Force refresh of cached data")
-        parser.add_argument(
-            "--cache-duration", type=int, default=3600,
-            help="Set cache duration in seconds (default: 3600)"
-        )
+        parser.add_argument("-q", "--quiet", action="store_true", help="Suppress INFO messages")
         
         args = parser.parse_args()
         
@@ -78,13 +67,17 @@ class SerialFinder:
         self.json_output = args.json
         self.show_zpool = args.zpool
         self.verbose = args.verbose
-        if args.verbose:
+        self.quiet = args.quiet
+        
+        # Configure logger based on verbosity/quiet settings
+        if self.verbose:
             self.logger.setLevel(logging.DEBUG)
             for handler in self.logger.handlers:
                 handler.setLevel(logging.DEBUG)
-        self.force_controller = args.controller if args.controller else ""
-        self.force_refresh = args.force
-        self.cache_duration = args.cache_duration
+        elif self.quiet:
+            self.logger.setLevel(logging.WARNING)
+            for handler in self.logger.handlers:
+                handler.setLevel(logging.WARNING)
 
     def check_command_exists(self, cmd: str) -> bool:
         """Check if a command exists in the system PATH"""
@@ -796,13 +789,9 @@ class SerialFinder:
         self.load_config()
         
         # Detect and select controller
-        if self.force_controller:
-            self.logger.info(f"Using forced controller: {self.force_controller}")
-            self.controller = self.force_controller
-        else:
-            self.logger.info("Detecting available controllers...")
-            self.controller = self.detect_controllers()
-            self.logger.info(f"Selected controller: {self.controller}")
+        self.logger.info("Detecting available controllers...")
+        self.controller = self.detect_controllers()
+        self.logger.info(f"Selected controller: {self.controller}")
         
         # Get disk information based on the selected controller
         self.logger.info(f"Collecting disk information from {self.controller}...")
