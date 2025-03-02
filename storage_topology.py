@@ -219,9 +219,12 @@ class StorageTopology:
             list_output = subprocess.check_output(["sas2ircu", "list"], universal_newlines=True)
             controller_ids = []
             
-            # Extract controller IDs from the output
+            # Updated regex pattern to match controller IDs in the table format
             for line in list_output.splitlines():
-                if re.match(r'^\s*\d+\s+SAS\d+', line):
+                # Look for lines that start with a number followed by spaces and then text
+                # This matches the format of the controller ID line in the output
+                if re.match(r'^\s*\d+\s+\S', line):
+                    # Extract just the number at the beginning
                     controller_id = line.strip().split()[0]
                     controller_ids.append(controller_id)
             
@@ -524,15 +527,25 @@ class StorageTopology:
         
         try:
             # Get list of controller IDs
+            self.logger.debug(f"Running {controller} list command")
             list_output = subprocess.check_output([controller, "list"], universal_newlines=True)
+            self.logger.debug(f"List output: {list_output}")
             controller_ids = []
             
+            # Updated regex pattern to match controller IDs in the table format
             for line in list_output.splitlines():
-                if re.match(r'^\d+$', line.strip()):
-                    controller_ids.append(line.strip())
+                # Look for lines that start with a number followed by spaces and then text
+                # This matches the format of the controller ID line in the output
+                if re.match(r'^\s*\d+\s+\S', line):
+                    # Extract just the number at the beginning
+                    controller_id = line.strip().split()[0]
+                    controller_ids.append(controller_id)
+            
+            self.logger.debug(f"Found controller IDs: {controller_ids}")
             
             # Build a list of controllers and enclosures
             for ctrl_id in controller_ids:
+                self.logger.debug(f"Running {controller} {ctrl_id} display command")
                 display_output = subprocess.check_output(
                     [controller, ctrl_id, "display"],
                     universal_newlines=True
@@ -541,16 +554,21 @@ class StorageTopology:
                 # Extract enclosure information
                 encl_info = ""
                 capture = False
+                self.logger.debug(f"Searching for 'Enclosure information' section")
                 for line in display_output.splitlines():
                     if "Enclosure information" in line:
+                        self.logger.debug(f"Found 'Enclosure information' section")
                         capture = True
                         continue
                     if capture:
                         if re.match(r'^-+$', line):
                             if encl_info:  # We've reached the end of the enclosure section
+                                self.logger.debug(f"End of enclosure section reached")
                                 break
                             continue
                         encl_info += line + "\n"
+                
+                self.logger.debug(f"Extracted enclosure info: {encl_info}")
                 
                 # Process enclosure information
                 encl_number = ""
@@ -559,14 +577,19 @@ class StorageTopology:
                 start_slot = ""
                 
                 for line in encl_info.splitlines():
+                    self.logger.debug(f"Processing line: {line}")
                     if "Enclosure#" in line:
                         encl_number = line.split(':')[1].strip()
+                        self.logger.debug(f"Found Enclosure#: {encl_number}")
                     elif "Logical ID" in line:
                         logical_id = line.split(':')[1].strip()
+                        self.logger.debug(f"Found Logical ID: {logical_id}")
                     elif "Numslots" in line:
                         num_slots = line.split(':')[1].strip()
+                        self.logger.debug(f"Found Numslots: {num_slots}")
                     elif "StartSlot" in line:
                         start_slot = line.split(':')[1].strip()
+                        self.logger.debug(f"Found StartSlot: {start_slot}")
                         
                         # Determine enclosure type based on number of slots
                         encl_type = "Unknown"
@@ -577,6 +600,7 @@ class StorageTopology:
                             elif slots <= 8:
                                 encl_type = "Internal"
                         
+                        self.logger.debug(f"Adding enclosure to map: controller={ctrl_id}, enclosure={encl_number}, type={encl_type}")
                         enclosure_map["Controllers"].append({
                             "controller": ctrl_id,
                             "enclosure": encl_number,
@@ -592,6 +616,7 @@ class StorageTopology:
         except (subprocess.SubprocessError, ValueError) as e:
             self.logger.warning(f"Error getting {controller} enclosure information: {e}")
         
+        self.logger.debug(f"Final enclosure map: {enclosure_map}")
         return enclosure_map
 
     def map_disk_locations(self, combined_disk: List[List[str]], controller: str) -> List[List[str]]:
@@ -826,26 +851,6 @@ class StorageTopology:
         """Load configuration file"""
         config_file = os.path.expanduser("./storage_topology.conf")
         
-        # Default configuration
-        self.custom_mappings = {}
-        self.enclosure_offsets = {}
-        
-        if os.path.isfile(config_file):
-            self.logger.info(f"Loading user configuration from {config_file}")
-            try:
-                with open(config_file, 'r') as f:
-                    config = yaml.safe_load(f)
-                    if config:
-                        if 'enclosure_mappings' in config:
-                            self.enclosure_offsets = config['enclosure_mappings']
-                        if 'custom_mappings' in config:
-                            self.custom_mappings = config['custom_mappings']
-                        config_found = True
-            except Exception as e:
-                self.logger.error(f"Error loading configuration from {config_file}: {e}")
-        
-        if not config_found:
-            self.logger.debug("No configuration file found, using defaults")
 
     def run(self) -> None:
         """Main function to run the script"""
