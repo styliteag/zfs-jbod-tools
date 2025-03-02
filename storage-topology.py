@@ -463,107 +463,131 @@ class StorageTopology:
         enclosure_map = {"Controllers": []}
         
         if controller == "storcli":
-            # For storcli, we can get enclosure information directly
-            try:
-                enclosure_info_output = subprocess.check_output(
-                    ["storcli", "/call/eall", "show", "all", "J"],
+            enclosure_map = self.detect_storcli_enclosure_types()
+        elif controller in ["sas2ircu", "sas3ircu"]:
+            enclosure_map = self.detect_sas_enclosure_types(controller)
+        
+        return enclosure_map
+
+    def detect_storcli_enclosure_types(self) -> Dict[str, Any]:
+        """Detect enclosure types for storcli controllers"""
+        enclosure_map = {"Controllers": []}
+        
+        try:
+            # Get enclosure information
+            enclosure_info_output = subprocess.check_output(
+                ["storcli", "/call/eall", "show", "all", "J"],
+                universal_newlines=True
+            )
+            enclosure_info = json.loads(enclosure_info_output)
+            
+            # Process each controller
+            for controller_data in enclosure_info.get("Controllers", []):
+                response_data = controller_data.get("Response Data", {})
+                
+                # Find enclosure keys
+                enclosure_keys = [k for k in response_data.keys() if k.startswith("Enclosure")]
+                
+                for enclosure_key in enclosure_keys:
+                    # Extract controller and enclosure numbers
+                    controller_match = re.search(r"/c(\d+)/e(\d+)", enclosure_key)
+                    if controller_match:
+                        controller_num = controller_match.group(1)
+                        enclosure_num = controller_match.group(2)
+                        
+                        # Get product identification
+                        enclosure_data = response_data.get(enclosure_key, {})
+                        inquiry_data = enclosure_data.get("Inquiry Data", {})
+                        product_id = inquiry_data.get("Product Identification", "").rstrip()
+                        
+                        # Get number of slots
+                        properties = enclosure_data.get("Properties", [{}])[0] if enclosure_data.get("Properties") else {}
+                        num_slots = properties.get("Slots", "0")
+                        
+                        enclosure_map["Controllers"].append({
+                            "controller": controller_num,
+                            "enclosure": enclosure_num,
+                            "type": product_id,
+                            "slots": num_slots
+                        })
+        except (subprocess.SubprocessError, json.JSONDecodeError, KeyError) as e:
+            self.logger.warning(f"Error getting storcli enclosure information: {e}")
+        
+        return enclosure_map
+
+    def detect_sas_enclosure_types(self, controller: str) -> Dict[str, Any]:
+        """Detect enclosure types for sas2ircu/sas3ircu controllers"""
+        enclosure_map = {"Controllers": []}
+        
+        try:
+            # Get list of controller IDs
+            list_output = subprocess.check_output([controller, "list"], universal_newlines=True)
+            controller_ids = []
+            
+            for line in list_output.splitlines():
+                if re.match(r'^\d+$', line.strip()):
+                    controller_ids.append(line.strip())
+            
+            # Build a list of controllers and enclosures
+            for ctrl_id in controller_ids:
+                display_output = subprocess.check_output(
+                    [controller, ctrl_id, "display"],
                     universal_newlines=True
                 )
-                enclosure_info = json.loads(enclosure_info_output)
                 
-                # Process each controller
-                for controller_data in enclosure_info.get("Controllers", []):
-                    response_data = controller_data.get("Response Data", {})
-                    
-                    # Find enclosure keys
-                    enclosure_keys = [k for k in response_data.keys() if k.startswith("Enclosure")]
-                    
-                    for enclosure_key in enclosure_keys:
-                        # Extract controller and enclosure numbers
-                        controller_match = re.search(r"/c(\d+)/e(\d+)", enclosure_key)
-                        if controller_match:
-                            controller_num = controller_match.group(1)
-                            enclosure_num = controller_match.group(2)
-                            
-                            # Get product identification
-                            enclosure_data = response_data.get(enclosure_key, {})
-                            inquiry_data = enclosure_data.get("Inquiry Data", {})
-                            product_id = inquiry_data.get("Product Identification", "").rstrip()
-                            
-                            enclosure_map["Controllers"].append({
-                                "controller": controller_num,
-                                "enclosure": enclosure_num,
-                                "type": product_id
-                            })
-            except (subprocess.SubprocessError, json.JSONDecodeError, KeyError) as e:
-                self.logger.warning(f"Error getting storcli enclosure information: {e}")
-        
-        elif controller in ["sas2ircu", "sas3ircu"]:
-            # For sas2ircu and sas3ircu, infer based on patterns
-            try:
-                # Get list of controller IDs
-                list_output = subprocess.check_output([controller, "list"], universal_newlines=True)
-                controller_ids = []
-                
-                for line in list_output.splitlines():
-                    if re.match(r'^\d+$', line.strip()):
-                        controller_ids.append(line.strip())
-                
-                # Build a list of controllers and enclosures
-                for ctrl_id in controller_ids:
-                    display_output = subprocess.check_output(
-                        [controller, ctrl_id, "display"],
-                        universal_newlines=True
-                    )
-                    
-                    # Extract enclosure information
-                    encl_info = ""
-                    capture = False
-                    for line in display_output.splitlines():
-                        if "Enclosure information" in line:
-                            capture = True
+                # Extract enclosure information
+                encl_info = ""
+                capture = False
+                for line in display_output.splitlines():
+                    if "Enclosure information" in line:
+                        capture = True
+                        continue
+                    if capture:
+                        if re.match(r'^-+$', line):
+                            if encl_info:  # We've reached the end of the enclosure section
+                                break
                             continue
-                        if capture:
-                            if re.match(r'^-+$', line):
-                                if encl_info:  # We've reached the end of the enclosure section
-                                    break
-                                continue
-                            encl_info += line + "\n"
-                    
-                    # Process enclosure information
-                    encl_number = ""
-                    logical_id = ""
-                    num_slots = ""
-                    
-                    for line in encl_info.splitlines():
-                        if "Enclosure#" in line:
-                            encl_number = line.split(':')[1].strip()
-                        elif "Logical ID" in line:
-                            logical_id = line.split(':')[1].strip()
-                        elif "Numslots" in line:
-                            num_slots = line.split(':')[1].strip()
-                            
-                            # Determine enclosure type based on number of slots
-                            encl_type = "Unknown"
-                            if num_slots and num_slots.isdigit():
-                                slots = int(num_slots)
-                                if slots > 20:
-                                    encl_type = "JBOD"
-                                elif slots <= 8:
-                                    encl_type = "Internal"
-                            
-                            enclosure_map["Controllers"].append({
-                                "controller": ctrl_id,
-                                "enclosure": encl_number,
-                                "type": encl_type,
-                                "slots": num_slots
-                            })
-                            
-                            # Reset for next enclosure
-                            encl_number = logical_id = num_slots = ""
-            
-            except (subprocess.SubprocessError, ValueError) as e:
-                self.logger.warning(f"Error getting {controller} enclosure information: {e}")
+                        encl_info += line + "\n"
+                
+                # Process enclosure information
+                encl_number = ""
+                logical_id = ""
+                num_slots = ""
+                start_slot = ""
+                
+                for line in encl_info.splitlines():
+                    if "Enclosure#" in line:
+                        encl_number = line.split(':')[1].strip()
+                    elif "Logical ID" in line:
+                        logical_id = line.split(':')[1].strip()
+                    elif "Numslots" in line:
+                        num_slots = line.split(':')[1].strip()
+                    elif "StartSlot" in line:
+                        start_slot = line.split(':')[1].strip()
+                        
+                        # Determine enclosure type based on number of slots
+                        encl_type = "Unknown"
+                        if num_slots and num_slots.isdigit():
+                            slots = int(num_slots)
+                            if slots > 20:
+                                encl_type = "JBOD"
+                            elif slots <= 8:
+                                encl_type = "Internal"
+                        
+                        enclosure_map["Controllers"].append({
+                            "controller": ctrl_id,
+                            "enclosure": encl_number,
+                            "logicalid": logical_id,
+                            "type": encl_type,
+                            "slots": num_slots,
+                            "start_slot": start_slot
+                        })
+                        
+                        # Reset for next enclosure
+                        encl_number = logical_id = num_slots = start_slot = ""
+        
+        except (subprocess.SubprocessError, ValueError) as e:
+            self.logger.warning(f"Error getting {controller} enclosure information: {e}")
         
         return enclosure_map
 
