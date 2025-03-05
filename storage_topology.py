@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import yaml
+import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 
@@ -1989,11 +1990,56 @@ class StorageTopology:
             self.logger.info(f"Selected controller: {self.controller}")
             
             if self.controller == "storcli":
-                # For storcli, we need to get the enclosure and slot
-                # This would need to be implemented based on storcli syntax
-                self.logger.error("storcli locate functionality not yet implemented")
-                sys.exit(1)
+                # For storcli, we need to get the enclosure and slot using the get_storcli_disks method
+                disks = self.get_storcli_disks()
                 
+                # Find our disk by serial number
+                disk_info = None
+                for disk in disks:
+                    if disk["sn"] == serial:
+                        disk_info = disk
+                        break
+                
+                if disk_info:
+                    controller = disk_info["controller"]
+                    enclosure = disk_info["enclosure"]
+                    slot = disk_info["drive"]
+                    
+                    self.logger.info(f"Found disk {disk_name} in controller {controller}, enclosure {enclosure}, slot {slot}")
+                    
+                    # Use storcli to turn on/off the locate LED
+                    try:
+                        locate_action = "stop" if turn_off else "start"
+                        
+                        # Build the command
+                        cmd = ["storcli", f"/c{controller}/e{enclosure}/s{slot}", f"{locate_action}", "locate"]
+                        self.logger.info(f"Executing: {' '.join(cmd)}")
+                        result = subprocess.check_output(cmd, universal_newlines=True)
+                        
+                        if turn_off:
+                            print(f"Successfully turned off locate LED for disk {disk_name}")
+                        else:
+                            print(f"Successfully turned on locate LED for disk {disk_name}")
+                            if wait_seconds is not None:
+                                # Storcli doesn't support built-in wait time, so implement wait and auto-turn-off
+                                print(f"LED will be turned off automatically after {wait_seconds} seconds")
+                                # Wait for the specified time
+                                time.sleep(wait_seconds)
+                                # Turn off the LED
+                                off_cmd = ["storcli", f"/c{controller}/e{enclosure}/s{slot}", "stop", "locate"]
+                                self.logger.info(f"Executing: {' '.join(off_cmd)}")
+                                subprocess.check_output(off_cmd, universal_newlines=True)
+                                print(f"LED for disk {disk_name} has been automatically turned off")
+                            else:
+                                print("Use the same command with --locate-off to turn off the LED")
+                                print(f"Command: python3 storage_topology.py --locate-off {disk_name}")
+                    except subprocess.CalledProcessError as e:
+                        self.logger.error(f"Error executing storcli command: {e}")
+                        sys.exit(1)
+                else:
+                    self.logger.error(f"Could not find disk {disk_name} with serial {serial} in storcli output")
+                    sys.exit(1)
+                    
             elif self.controller in ["sas2ircu", "sas3ircu"]:
                 # For sas2ircu/sas3ircu, we need to find the enclosure and slot from the DISPLAY output
                 # First, get the full output
@@ -2060,7 +2106,7 @@ class StorageTopology:
         """Turn off the identify LED for all disks
         
         This method attempts to turn off the identify LED for all disks
-        using the appropriate controller command (sas2ircu or sas3ircu).
+        using the appropriate controller command (storcli, sas2ircu, or sas3ircu).
         """
         self.logger.info("Turning off identify LED for all disks")
         
@@ -2070,9 +2116,39 @@ class StorageTopology:
         self.logger.info(f"Selected controller: {self.controller}")
         
         if self.controller == "storcli":
-            # Handle storcli - not implemented yet
-            self.logger.error("storcli locate functionality not yet implemented")
-            sys.exit(1)
+            # For storcli, we need to get all drives from get_storcli_disks()
+            try:
+                disks = self.get_storcli_disks()
+                
+                if not disks:
+                    self.logger.error("No disks found in storcli output")
+                    sys.exit(1)
+                
+                # Turn off LED for each disk
+                success_count = 0
+                failed_count = 0
+                
+                for disk in disks:
+                    try:
+                        controller = disk["controller"]
+                        enclosure = disk["enclosure"]
+                        slot = disk["drive"]
+                        
+                        cmd = ["storcli", f"/c{controller}/e{enclosure}/s{slot}", "stop", "locate"]
+                        self.logger.info(f"Executing: {' '.join(cmd)}")
+                        result = subprocess.check_output(cmd, universal_newlines=True)
+                        success_count += 1
+                    except subprocess.CalledProcessError as e:
+                        self.logger.warning(f"Failed to turn off LED for c{controller}/e{enclosure}/s{slot}: {e}")
+                        failed_count += 1
+                
+                print(f"Successfully turned off {success_count} disk LEDs")
+                if failed_count > 0:
+                    print(f"Failed to turn off {failed_count} disk LEDs")
+                
+            except subprocess.CalledProcessError as e:
+                self.logger.error(f"Error executing storcli command: {e}")
+                sys.exit(1)
             
         elif self.controller in ["sas2ircu", "sas3ircu"]:
             # For sas2ircu/sas3ircu
