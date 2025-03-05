@@ -5,17 +5,6 @@ Storage Topology Tool
 This script identifies physical disk locations by matching controller information with system devices.
 It supports LSI MegaRAID controllers via storcli and LSI SAS controllers via sas2ircu/sas3ircu.
 
-Code Improvements:
-- Reduced duplicate code by adding helper methods for common operations:
-  - _normalize_disk_name: Normalize disk paths by removing '/dev/' prefix
-  - _execute_command: Unified command execution with error handling
-  - _parse_json_output: Centralized JSON parsing with error handling
-- Split large methods into smaller, more focused methods:
-  - _locate_disk_storcli and _locate_disk_sas for controller-specific disk location
-  - _locate_all_disks_off_storcli and _locate_all_disks_off_sas for turning off disk LEDs
-- Improved error handling with consistent patterns
-- Removed duplicate string manipulation code
-- Made command execution handling consistent across methods
 """
 
 import argparse
