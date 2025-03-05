@@ -1,17 +1,9 @@
 #!/usr/bin/env python3
 """
-Storage Topology - Identifies physical disk locations by matching controller information with system devices
+Storage Topology Tool
 
-This script helps identify physical disk locations by correlating storage controller information
-with system block devices. It supports storcli, sas2ircu, and sas3ircu controllers.
-
-Key Features:
-- Detects available storage controllers automatically
-- Matches physical disk locations with system devices
-- Supports JSON output for programmatic use
-- Integrates with ZFS pools
-- Handles multipath devices
-- Customizable through configuration files
+This script identifies physical disk locations by matching controller information with system devices.
+It supports LSI MegaRAID controllers via storcli and LSI SAS controllers via sas2ircu/sas3ircu.
 """
 
 import argparse
@@ -23,7 +15,7 @@ import shutil
 import subprocess
 import sys
 import yaml
-from typing import Dict, List, Optional, Any, Tuple, Set, Union
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 
 class StorageTopology:
@@ -65,6 +57,12 @@ class StorageTopology:
         combined_disk_complete (List[List]): Complete disk information with locations
         enclosure_offsets (Dict): Custom enclosure configuration
         custom_mappings (Dict): Custom disk mappings
+        query_disk (str): Query disk name
+        update_disk (Tuple[str, str, str]): Update disk information
+        update_all_disks (bool): Flag to update all disks
+        sort_by (str): Field to sort query results by
+        pool_disks_only (bool): Flag to show only disks that are part of ZFS pools
+        pool_name (str): Name of the ZFS pool to filter by
         logger (Logger): Application logger
     """
 
@@ -81,6 +79,12 @@ class StorageTopology:
         self.combined_disk_complete = []
         self.enclosure_offsets = {}
         self.custom_mappings = {}
+        self.query_disk = None
+        self.update_disk = None
+        self.update_all_disks = False
+        self.sort_by = "pool"
+        self.pool_disks_only = False
+        self.pool_name = None
         self.logger = self._setup_logger()
 
     def _setup_logger(self) -> logging.Logger:
@@ -89,7 +93,7 @@ class StorageTopology:
         Returns:
             Logger: Configured logger instance
         """
-        logger = logging.getLogger("serial-finder")
+        logger = logging.getLogger("storage-topology")
         logger.setLevel(logging.INFO)
         
         # Create console handler with standard output format
@@ -115,6 +119,18 @@ class StorageTopology:
         parser.add_argument("-z", "--zpool", action="store_true", help="Display ZFS pool information")
         parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
         parser.add_argument("-q", "--quiet", action="store_true", help="Suppress INFO messages")
+        parser.add_argument("--query", nargs='?', const='all', metavar="DISK_NAME", 
+                          help="Query disk information from TrueNAS. Use without arguments to query all disks.")
+        parser.add_argument("--sort-by", choices=["disk", "serial", "model", "size", "description", "pool"], default="pool",
+                          help="Sort query results by specified field (default: disk)")
+        parser.add_argument("--pool-disks-only", action="store_true",
+                          help="When querying, show only disks that are part of ZFS pools")
+        parser.add_argument("--pool", metavar="POOL_NAME",
+                          help="When querying, show only disks that are part of the specified ZFS pool")
+        parser.add_argument("--update", metavar="DISK_NAME", 
+                          help="Update disk description in TrueNAS with location information from detected hardware")
+        parser.add_argument("--update-all", action="store_true", 
+                          help="Update all disk descriptions in TrueNAS with detected location information")
         
         args = parser.parse_args()
         
@@ -123,6 +139,12 @@ class StorageTopology:
         self.show_zpool = args.zpool
         self.verbose = args.verbose
         self.quiet = args.quiet
+        self.query_disk = args.query
+        self.update_disk = args.update
+        self.update_all_disks = args.update_all
+        self.sort_by = args.sort_by
+        self.pool_disks_only = args.pool_disks_only
+        self.pool_name = args.pool
         
         # Configure logger based on verbosity/quiet settings
         if self.verbose:
@@ -1096,16 +1118,295 @@ class StorageTopology:
             self.logger.error(f"Error getting ZFS pool information: {e}")
 
     def check_dependencies(self) -> None:
-        """Check for required dependencies"""
-        missing_deps = False
+        """Check for required dependencies based on requested operations"""
+        required_cmds = []
         
-        for cmd in ["jq", "awk", "grep", "sed"]:
+        # Basic requirements for disk detection
+        if not self.query_disk and not self.update_disk:
+            required_cmds.extend(["lsblk", "smartctl"])
+            
+            # Controller-specific tools will be checked when detecting controllers
+            if self.check_command_exists("storcli"):
+                self.logger.debug("Found storcli command")
+            if self.check_command_exists("sas2ircu"):
+                self.logger.debug("Found sas2ircu command")
+            if self.check_command_exists("sas3ircu"):
+                self.logger.debug("Found sas3ircu command")
+                
+            # ZFS tools
+            if self.show_zpool:
+                required_cmds.append("zpool")
+        
+        # TrueNAS API requirements
+        if self.query_disk or self.update_disk or self.update_all_disks or self.pool_name:
+            required_cmds.append("midclt")
+            
+        # ZFS pool requirements
+        if self.show_zpool or self.pool_disks_only or self.pool_name:
+            required_cmds.append("zpool")
+        
+        # Check all required commands
+        missing = []
+        for cmd in required_cmds:
             if not self.check_command_exists(cmd):
-                self.logger.error(f"Required dependency '{cmd}' is not installed.")
-                missing_deps = True
+                missing.append(cmd)
+                
+        if missing:
+            self.logger.error(f"Required command(s) not found: {', '.join(missing)}")
+            sys.exit(1)
+
+    def query_truenas_disk(self, disk_name: str) -> None:
+        """Query disk information from TrueNAS
         
-        if missing_deps:
-            self.logger.error("Please install the missing dependencies and try again.")
+        Args:
+            disk_name: Name of the disk to query (e.g., ada0) or 'all' for all disks
+        """
+        self.logger.info(f"Querying TrueNAS for disk: {disk_name}")
+        
+        # Remove /dev/ prefix if present
+        if disk_name != 'all' and disk_name.startswith('/dev/'):
+            disk_name = disk_name.replace('/dev/', '')
+            self.logger.debug(f"Removed /dev/ prefix, using disk name: {disk_name}")
+            
+        try:
+            # Build the query command
+            if disk_name == 'all':
+                query_cmd = ["midclt", "call", "disk.query", "[]"]
+                self.logger.info("Querying all disks in TrueNAS")
+            else:
+                query_cmd = ["midclt", "call", "disk.query", f'[["name", "=", "{disk_name}"]]']
+                self.logger.info(f"Querying disk: {disk_name}")
+                
+            self.logger.debug(f"Executing command: {' '.join(query_cmd)}")
+            
+            # Execute the command
+            result = subprocess.check_output(query_cmd, universal_newlines=True)
+            
+            # Parse the JSON output
+            disk_info = json.loads(result)
+            
+            # Get pool information
+            pool_disk_mapping = self.get_pool_disk_mapping()
+            
+            # Filter disks by pool membership if requested
+            if self.pool_disks_only and disk_name == 'all':
+                self.logger.info("Filtering disks to show only those in ZFS pools")
+                disk_info = [disk for disk in disk_info if disk.get("name") in pool_disk_mapping]
+            
+            # Filter disks by specific pool if requested
+            if self.pool_name and disk_name == 'all':
+                self.logger.info(f"Filtering disks to show only those in ZFS pool: {self.pool_name}")
+                disk_info = [disk for disk in disk_info if 
+                            disk.get("name") in pool_disk_mapping and 
+                            pool_disk_mapping[disk.get("name")].get("pool") == self.pool_name]
+                
+            # Display the results
+            if self.json_output:
+                print(json.dumps(disk_info, indent=2))
+            else:
+                if disk_info:
+                    if disk_name == 'all':
+                        title = "Disk Information for all disks"
+                        if self.pool_disks_only:
+                            title += " in ZFS pools"
+                        if self.pool_name:
+                            title += f" in pool: {self.pool_name}"
+                        print(f"\n{title}:")
+                        print(f"Found {len(disk_info)} disks")
+                    else:
+                        print(f"\nDisk Information for {disk_name}:")
+                    
+                    # Create a table with the requested fields - reordered to make Pool more visible
+                    headers = ["Disk", "Pool", "Serial", "Model", "Size", "Description"]
+                    
+                    # Extract data for each disk
+                    table_data = []
+                    for disk in disk_info:
+                        disk_name = disk.get("name", "N/A")
+                        
+                        # Convert size from bytes to a more readable format if available
+                        size_bytes = disk.get("size", 0)
+                        size_str = "N/A"
+                        size_raw = 0  # For sorting
+                        if size_bytes:
+                            size_raw = size_bytes
+                            # Convert to GB or TB for readability
+                            if size_bytes >= 1000000000000:  # TB
+                                size_str = f"{size_bytes / 1000000000000:.2f} TB"
+                            else:  # GB
+                                size_str = f"{size_bytes / 1000000000:.2f} GB"
+                        
+                        # Get pool information from our mapping
+                        if disk_name in pool_disk_mapping:
+                            pool_info = pool_disk_mapping[disk_name]
+                            pool_name = pool_info['pool']  # Just use the pool name without the state
+                        else:
+                            pool_name = "Not in pool"
+                        
+                        row = [
+                            disk_name,
+                            pool_name,
+                            disk.get("serial", "N/A"),
+                            disk.get("model", "N/A"),
+                            size_str,
+                            disk.get("description", "")
+                        ]
+                        
+                        # Add size_raw at the end for sorting
+                        row.append(size_raw)
+                        table_data.append(row)
+                    
+                    # Sort the data based on the selected field
+                    sort_index_map = {
+                        "disk": 0,
+                        "pool": 1,
+                        "serial": 2,
+                        "model": 3,
+                        "size": 6,  # Use the raw size value (last column)
+                        "description": 5
+                    }
+                    
+                    sort_index = sort_index_map.get(self.sort_by, 0)
+                    
+                    # For most fields, sort normally
+                    if self.sort_by == "size":
+                        # Sort by size (largest first)
+                        table_data.sort(key=lambda x: x[sort_index], reverse=True)
+                    elif self.sort_by == "pool":
+                        # Special sorting for pool to group None values at the end
+                        # and handle pool names with status info
+                        table_data.sort(key=lambda x: (x[sort_index] == "None", 
+                                                     x[sort_index].split()[0] if isinstance(x[sort_index], str) else ""))
+                    else:
+                        # Normal string sorting
+                        table_data.sort(key=lambda x: (x[sort_index] is None, x[sort_index] == "", x[sort_index]))
+                    
+                    # Remove the raw size value used for sorting
+                    for row in table_data:
+                        row.pop()
+                    
+                    # Calculate column widths for proper alignment
+                    widths = [len(h) for h in headers]
+                    for row in table_data:
+                        for i, val in enumerate(row):
+                            widths[i] = max(widths[i], len(str(val)))
+                    
+                    # Print header
+                    header_parts = []
+                    for i, h in enumerate(headers):
+                        header_parts.append(h.ljust(widths[i]))
+                    header_line = "  ".join(header_parts)
+                    print("-" * len(header_line))
+                    print(header_line)
+                    print("-" * len(header_line))
+                    
+                    # Print data rows
+                    for row in table_data:
+                        row_parts = []
+                        for i, val in enumerate(row):
+                            row_parts.append(str(val).ljust(widths[i]))
+                        line = "  ".join(row_parts)
+                        print(line)
+                    
+                    print("-" * len(header_line))
+                    print(f"Sorted by: {self.sort_by.capitalize()}")
+                    
+                    # Print pool summary if we have pools
+                    if pool_disk_mapping:
+                        print("\nPool Summary:")
+                        pools = {}
+                        for disk, info in pool_disk_mapping.items():
+                            pool = info["pool"]
+                            if pool not in pools:
+                                pools[pool] = 0
+                            pools[pool] += 1
+                        
+                        for pool, count in pools.items():
+                            print(f"  {pool}: {count} disks")
+                    else:
+                        print("\nNo ZFS pools found in the system")
+                else:
+                    if disk_name == 'all':
+                        msg = "No disks found in the system"
+                        if self.pool_disks_only:
+                            msg = "No disks found in ZFS pools"
+                        if self.pool_name:
+                            msg = f"No disks found in ZFS pool: {self.pool_name}"
+                        print(msg)
+                    else:
+                        print(f"No disk found with name: {disk_name}")
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Error querying TrueNAS: {e}")
+            sys.exit(1)
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Error parsing JSON response: {e}")
+            sys.exit(1)
+
+    def update_truenas_disk(self, disk_name: str, location: str, slot: str) -> None:
+        """Update disk description in TrueNAS
+        
+        Args:
+            disk_name: Name of the disk to update (e.g., ada0)
+            location: Physical location description
+            slot: Slot number
+        """
+        self.logger.info(f"Updating TrueNAS disk description for: {disk_name}")
+        
+        # Remove /dev/ prefix if present
+        if disk_name.startswith('/dev/'):
+            disk_name = disk_name.replace('/dev/', '')
+            self.logger.debug(f"Removed /dev/ prefix, using disk name: {disk_name}")
+            
+        try:
+            # First, query the current disk information
+            query_cmd = ["midclt", "call", "disk.query", f'[["name", "=", "{disk_name}"]]']
+            self.logger.debug(f"Executing command: {' '.join(query_cmd)}")
+            
+            result = subprocess.check_output(query_cmd, universal_newlines=True)
+            disk_info = json.loads(result)
+            
+            if not disk_info:
+                self.logger.error(f"No disk found with name: {disk_name}")
+                sys.exit(1)
+                
+            # Get the disk identifier which is required for updates
+            disk_identifier = disk_info[0].get("identifier")
+            if not disk_identifier:
+                self.logger.error(f"Could not get identifier for disk: {disk_name}")
+                sys.exit(1)
+            
+            # Get the current description
+            current_description = disk_info[0].get("description", "").strip()
+            
+            # Create the location information string
+            location_info = f"Loc:{location};SLOT:{slot}"
+            
+            # If there's an existing description, preserve it and append the location info
+            if current_description:
+                # Remove any existing location information (Loc:*) from the description
+                import re
+                current_description = re.sub(r'Loc:[^;]*;SLOT:[0-9]+', '', current_description).strip()
+                
+                # If there's still description text left, use it and append the location
+                if current_description:
+                    updated_description = f"{current_description} {location_info}"
+                else:
+                    updated_description = location_info
+            else:
+                # No existing description, just use the location info
+                updated_description = location_info
+            
+            # Build the update command using the disk identifier
+            update_cmd = ["midclt", "call", "disk.update", disk_identifier, 
+                          f'{{"description": "{updated_description}"}}']
+            self.logger.debug(f"Executing command: {' '.join(update_cmd)}")
+            
+            # Execute the update command
+            subprocess.check_output(update_cmd, universal_newlines=True)
+            self.logger.info(f"Successfully updated disk description for: {disk_name}")
+            
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Error updating TrueNAS disk: {e}")
             sys.exit(1)
 
     def load_config(self) -> None:
@@ -1192,6 +1493,110 @@ class StorageTopology:
         else:
             self.logger.warning(f"Configuration file {config_file} not found. Using default settings.")
 
+    def update_all_truenas_disks(self, combined_disk_complete: List[List[str]]) -> None:
+        """Update all disk descriptions in TrueNAS with detected location information
+        
+        This method takes the combined disk information that includes physical locations
+        and updates all disks in TrueNAS with their respective location information.
+        
+        Args:
+            combined_disk_complete: List of disk information including physical locations
+        """
+        self.logger.info("Updating all TrueNAS disk descriptions with location information")
+        
+        # Convert combined_disk_complete to a dictionary for easier access
+        disk_info = {}
+        for disk in combined_disk_complete:
+            if len(disk) >= 14:
+                # Store the disk info with both the full path and the short name as keys
+                disk_name = disk[0]
+                short_name = disk_name.replace('/dev/', '') if disk_name.startswith('/dev/') else disk_name
+                
+                disk_data = {
+                    "dev_name": disk_name,
+                    "enclosure_name": disk[10],
+                    "encslot": disk[11],
+                    "location": disk[13]
+                }
+                
+                # Store with both full path and short name for easier lookup
+                disk_info[disk_name] = disk_data
+                disk_info[short_name] = disk_data
+        
+        if not disk_info:
+            self.logger.error("No disk location information available. Run the tool without --update-all first.")
+            sys.exit(1)
+            
+        # Get all disks from TrueNAS
+        try:
+            self.logger.info("Retrieving current disk information from TrueNAS")
+            query_cmd = ["midclt", "call", "disk.query", "[]"]
+            self.logger.debug(f"Executing command: {' '.join(query_cmd)}")
+            
+            result = subprocess.check_output(query_cmd, universal_newlines=True)
+            all_disks = json.loads(result)
+            
+            updated_count = 0
+            skipped_count = 0
+            
+            # Process each disk
+            for truenas_disk in all_disks:
+                disk_name = truenas_disk.get("name")
+                
+                # If we have location information for this disk
+                if disk_name in disk_info:
+                    location_info = disk_info[disk_name]
+                    enclosure = location_info.get("enclosure_name", "")
+                    slot = location_info.get("encslot", "")
+                    
+                    # Only update if we have both enclosure and slot information
+                    if enclosure and slot:
+                        # Get the current description
+                        current_description = truenas_disk.get("description", "").strip()
+                        
+                        # Remove any existing "Loc:" entries but keep other content
+                        new_description = re.sub(r'Loc:[^;]*;SLOT:[0-9]+', '', current_description).strip()
+                        
+                        # Add the new location information
+                        location_entry = f"Loc:{enclosure};SLOT:{slot}"
+                        
+                        # If there's existing description content, append the location
+                        if new_description:
+                            updated_description = f"{new_description} {location_entry}"
+                        else:
+                            updated_description = location_entry
+                        
+                        # Build the update command
+                        disk_identifier = truenas_disk.get("identifier")
+                        update_cmd = ["midclt", "call", "disk.update", disk_identifier, 
+                                    f'{{"description": "{updated_description}"}}']
+                        self.logger.debug(f"Updating disk {disk_name}: {' '.join(update_cmd)}")
+                        
+                        # Execute the update command
+                        update_result = subprocess.check_output(update_cmd, universal_newlines=True)
+                        
+                        # Parse the result
+                        updated_info = json.loads(update_result)
+                        updated_count += 1
+                        
+                        print(f"Updated disk: {disk_name}")
+                        print(f"  New description: {updated_info.get('description', 'N/A')}")
+                    else:
+                        self.logger.warning(f"Skipping disk {disk_name}: Missing enclosure or slot information")
+                        skipped_count += 1
+                else:
+                    self.logger.debug(f"Skipping disk {disk_name}: No location information available")
+                    skipped_count += 1
+            
+            print(f"\nSummary: Updated {updated_count} disks, skipped {skipped_count} disks")
+            
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Error updating TrueNAS disks: {e}")
+            sys.exit(1)
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Error parsing JSON response: {e}")
+            sys.exit(1)
+
     def run(self) -> None:
         """Main function to run the script
         
@@ -1217,6 +1622,11 @@ class StorageTopology:
         # Check for required dependencies
         self.check_dependencies()
         
+        # Handle TrueNAS query if specified
+        if self.query_disk:
+            self.query_truenas_disk(self.query_disk)
+            return
+            
         # Load configuration if available
         self.load_config()
         
@@ -1250,32 +1660,72 @@ class StorageTopology:
         self.logger.info("Mapping physical locations...")
         self.combined_disk_complete = self.map_disk_locations(self.combined_disk, self.controller)
         
+        # Debug: Print the structure of combined_disk_complete
+        self.logger.debug("Combined disk complete structure:")
+        for disk in self.combined_disk_complete:
+            self.logger.debug(f"Disk entry: {disk}")
+        
+        # Handle TrueNAS update if specified
+        if self.update_disk:
+            disk_name = self.update_disk
+            # Add /dev/ prefix if not already present
+            if not disk_name.startswith('/dev/'):
+                disk_name_with_prefix = f'/dev/{disk_name}'
+            else:
+                disk_name_with_prefix = disk_name
+                disk_name = disk_name.replace('/dev/', '')
+            
+            # Find the disk in combined_disk_complete
+            disk_found = False
+            for disk in self.combined_disk_complete:
+                if len(disk) >= 14 and (disk[0] == disk_name_with_prefix or disk[0] == disk_name):
+                    # Extract location information from the disk data
+                    enclosure_name = disk[10]  # Enclosure name at index 10
+                    encslot = disk[11]         # Slot number at index 11
+                    
+                    if enclosure_name and encslot:
+                        self.logger.info(f"Found location information for disk {self.update_disk}: {enclosure_name}, slot {encslot}")
+                        # Update the disk with the location information from combined_disk_complete
+                        self.update_truenas_disk(self.update_disk, enclosure_name, encslot)
+                        disk_found = True
+                        break
+            
+            if not disk_found:
+                self.logger.error(f"No location information found for disk: {self.update_disk}")
+                sys.exit(1)
+                
+            return
+        
+        # Handle update all disks if specified
+        if self.update_all_disks:
+            self.update_all_truenas_disks(self.combined_disk_complete)
+            return
+            
         # Sort the results by enclosure name and physical slot number
         self.logger.info("Sorting results by enclosure and slot...")
+        
         def get_sort_key(disk):
             # Extract enclosure name (at index 10) and physical slot (at index 11)
-            enclosure_name = disk[10] if len(disk) > 10 else ""
+            enc_name = disk[10] if len(disk) > 10 else ""
+            enc_slot = disk[11] if len(disk) > 11 else ""
             
-            # Convert physical slot to integer for numeric sorting, with fallback to 0
+            # Convert slot to integer for proper numeric sorting (if it's a number)
             try:
-                physical_slot = int(disk[11]) if len(disk) > 11 and disk[11].isdigit() else 0
+                slot_num = int(enc_slot)
             except (ValueError, TypeError):
-                physical_slot = 0
+                slot_num = 0
                 
-            # Return tuple for sorting (enclosure first, then slot)
-            return (enclosure_name, physical_slot)
+            return (enc_name, slot_num)
             
-        # Sort the list in-place
         self.combined_disk_complete.sort(key=get_sort_key)
         
         # Display the results
         if self.json_output:
-            # Output as JSON
-            result = []
+            output = []
             for disk in self.combined_disk_complete:
                 if len(disk) >= 14:
-                    result.append({
-                        "device": disk[0],
+                    output.append({
+                        "dev_name": disk[0],
                         "name": disk[1],
                         "slot": disk[2],
                         "controller": disk[3],
@@ -1286,18 +1736,18 @@ class StorageTopology:
                         "manufacturer": disk[8],
                         "wwn": disk[9],
                         "enclosure_name": disk[10],
-                        "physical_slot": disk[11],
-                        "logical_disk": disk[12],
+                        "encslot": disk[11],
+                        "encdisk": disk[12],
                         "location": disk[13]
                     })
-            print(json.dumps(result, indent=2))
+            print(json.dumps(output, indent=2))
         else:
-            # Display as formatted table
-            # Create column headers
-            headers = ["Device", "Name", "Slot", "Ctrl", "Enc", "Drive", "Serial", 
-                      "Model", "Manufacturer", "WWN", "Enc Name", "PhySlot", "LogDisk", "Location"]
+            # Define the headers
+            headers = ["Device", "Name", "Slot", "Ctrl", "Enc", "Drive", 
+                      "Serial", "Model", "Manufacturer", "WWN", 
+                      "Enclosure", "PhysSlot", "LogDisk", "Location"]
             
-            # Calculate column widths
+            # Calculate dynamic column widths based on data and headers
             widths = [len(h) for h in headers]
             for disk in self.combined_disk_complete:
                 for i, val in enumerate(disk):
@@ -1305,18 +1755,165 @@ class StorageTopology:
                         widths[i] = max(widths[i], len(str(val)))
             
             # Print header
-            header_line = "  ".join(h.ljust(widths[i]) for i, h in enumerate(headers) if i < len(widths))
+            header_parts = []
+            for i, h in enumerate(headers):
+                header_parts.append(h.ljust(widths[i]))
+            header_line = "  ".join(header_parts)
             print(header_line)
             
             # Print data
             for disk in self.combined_disk_complete:
-                line = "  ".join(str(val).ljust(widths[i]) for i, val in enumerate(disk) if i < len(widths))
+                row_parts = []
+                for i, val in enumerate(disk):
+                    if i < len(widths):
+                        row_parts.append(str(val).ljust(widths[i]))
+                line = "  ".join(row_parts)
                 print(line)
         
-        # Display ZFS pool information if requested
+        # Show ZFS pool information if requested
         if self.show_zpool:
-            self.logger.info("Displaying ZFS pool information...")
             self.display_zpool_info(self.combined_disk_complete)
+
+    def get_pool_disk_mapping(self) -> Dict[str, Dict[str, str]]:
+        """Get a mapping of disks to their ZFS pools
+        
+        Returns:
+            Dict mapping disk names to their pool information (pool name and state)
+        """
+        pool_disk_mapping = {}
+        
+        try:
+            # First try to get pool information using JSON output
+            if self.check_command_exists("zpool"):
+                self.logger.info("Getting pool information from zpool status -L -j")
+                try:
+                    zpool_cmd = ["zpool", "status", "-L", "-j"]
+                    zpool_output = subprocess.check_output(zpool_cmd, universal_newlines=True)
+                    
+                    # Parse the JSON output
+                    zpool_data = json.loads(zpool_output)
+                    
+                    # Process each pool
+                    if "pools" in zpool_data:
+                        for pool_name, pool_info in zpool_data["pools"].items():
+                            pool_state = pool_info.get("state", "UNKNOWN")
+                            self.logger.debug(f"Processing pool: {pool_name} ({pool_state})")
+                            
+                            # Process the vdevs recursively to find all disks
+                            self._process_vdevs(pool_info.get("vdevs", {}), pool_name, pool_state, pool_disk_mapping)
+                except json.JSONDecodeError as e:
+                    self.logger.warning(f"Error parsing JSON from zpool status: {e}")
+                except Exception as e:
+                    self.logger.warning(f"Error getting pool information from zpool status -L -j: {e}")
+            
+            # If we couldn't get pool info from JSON, fall back to text parsing
+            if not pool_disk_mapping and self.check_command_exists("zpool"):
+                self.logger.info("Falling back to text parsing from zpool status")
+                zpool_cmd = ["zpool", "status"]
+                zpool_output = subprocess.check_output(zpool_cmd, universal_newlines=True)
+                
+                # Parse zpool output to map disks to pools
+                current_pool = None
+                in_config_section = False
+                
+                for line in zpool_output.splitlines():
+                    line = line.strip()
+                    
+                    # Detect pool name
+                    if line.startswith("pool:"):
+                        current_pool = line.split(":", 1)[1].strip()
+                        self.logger.debug(f"Found pool: {current_pool}")
+                        
+                    # Detect config section
+                    elif line.startswith("config:"):
+                        in_config_section = True
+                        
+                    # Process disk entries in config section
+                    elif in_config_section and current_pool and line and not line.startswith("NAME") and not line.startswith("state:"):
+                        # Skip header line and empty lines
+                        parts = line.split()
+                        if len(parts) >= 1:
+                            device = parts[0]
+                            state = parts[1] if len(parts) > 1 else "UNKNOWN"
+                            
+                            # Skip pool name and special devices
+                            if device != current_pool and not any(x in device for x in ["mirror", "raidz", "spare", "log", "cache"]):
+                                # Extract the base device name (remove partition info)
+                                base_device = device.split("/")[-1].split("-")[0]
+                                # Remove any partition numbers (e.g., sda2 -> sda)
+                                base_device = re.sub(r'(\D+)\d+$', r'\1', base_device)
+                                
+                                self.logger.debug(f"Mapping disk {base_device} to pool {current_pool} with state {state}")
+                                pool_disk_mapping[base_device] = {"pool": current_pool, "state": state}
+            
+            # If we still couldn't get pool info, try the TrueNAS API
+            if not pool_disk_mapping and self.check_command_exists("midclt"):
+                self.logger.info("Getting pool information from TrueNAS API")
+                pools_cmd = ["midclt", "call", "pool.query", "[]"]
+                pools_result = subprocess.check_output(pools_cmd, universal_newlines=True)
+                pools_info = json.loads(pools_result)
+                
+                if pools_info:
+                    self.logger.debug(f"Found {len(pools_info)} pools via API")
+                    
+                    # For each pool, get the topology to find member disks
+                    for pool in pools_info:
+                        pool_name = pool.get("name")
+                        if not pool_name:
+                            continue
+                            
+                        # Get detailed information about the pool's topology
+                        topology_cmd = ["midclt", "call", "pool.get_disks", f'["{pool_name}"]']
+                        try:
+                            topology_result = subprocess.check_output(topology_cmd, universal_newlines=True)
+                            pool_disks = json.loads(topology_result)
+                            
+                            self.logger.debug(f"Pool {pool_name} has disks: {pool_disks}")
+                            
+                            # Map each disk to this pool
+                            for disk in pool_disks:
+                                # Extract base device name
+                                base_disk = disk.split("/")[-1].split("-")[0]
+                                # Remove any partition numbers (e.g., sda2 -> sda)
+                                base_disk = re.sub(r'(\D+)\d+$', r'\1', base_disk)
+                                
+                                pool_disk_mapping[base_disk] = {
+                                    "pool": pool_name,
+                                    "state": pool.get("status", "UNKNOWN")
+                                }
+                        except Exception as e:
+                            self.logger.warning(f"Error getting disks for pool {pool_name}: {e}")
+                else:
+                    self.logger.info("No pools found in the system")
+        except Exception as e:
+            self.logger.warning(f"Error getting pool information: {e}")
+            
+        return pool_disk_mapping
+        
+    def _process_vdevs(self, vdevs: Dict, pool_name: str, pool_state: str, pool_disk_mapping: Dict[str, Dict[str, str]]) -> None:
+        """Recursively process vdevs to find all disks in a pool
+        
+        Args:
+            vdevs: Dictionary of vdevs to process
+            pool_name: Name of the pool
+            pool_state: State of the pool
+            pool_disk_mapping: Dictionary to update with disk-to-pool mappings
+        """
+        for vdev_name, vdev_info in vdevs.items():
+            # If this vdev has child vdevs, process them recursively
+            if "vdevs" in vdev_info:
+                self._process_vdevs(vdev_info["vdevs"], pool_name, pool_state, pool_disk_mapping)
+            else:
+                # This is a leaf vdev (disk)
+                # Extract the base device name (remove partition info)
+                # Example: convert "sda2" to "sda"
+                base_device = re.sub(r'(\D+)\d+$', r'\1', vdev_name)
+                
+                self.logger.debug(f"Mapping disk {base_device} (from {vdev_name}) to pool {pool_name} with state {pool_state}")
+                pool_disk_mapping[base_device] = {
+                    "pool": pool_name,
+                    "state": pool_state
+                }
 
 
 if __name__ == "__main__":
@@ -1328,7 +1925,7 @@ if __name__ == "__main__":
         sys.exit(1)
     except Exception as e:
         print(f"Error: {e}")
-        if logging.getLogger("serial-finder").level == logging.DEBUG:
+        if logging.getLogger("storage-topology").level == logging.DEBUG:
             import traceback
             traceback.print_exc()
         sys.exit(1) 
