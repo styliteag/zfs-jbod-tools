@@ -137,10 +137,12 @@ class StorageTopology:
                           help="Turn on the identify LED for the specified disk")
         parser.add_argument("--locate-off", metavar="DISK_NAME",
                           help="Turn off the identify LED for the specified disk")
+        parser.add_argument("--locate-all", action="store_true",
+                          help="Turn on the identify LED for all disks (will turn off after the wait time)")
         parser.add_argument("--locate-all-off", action="store_true",
                           help="Turn off the identify LED for all disks")
-        parser.add_argument("--wait", type=int, metavar="SECONDS", 
-                          help="When used with --locate, specifies the number of seconds the LED should blink (1-60)")
+        parser.add_argument("--wait", type=int, metavar="SECONDS",
+                          help="When used with --locate, specifies the number of seconds the LED should blink (1-60). For --locate-all, default is 5 seconds.")
         
         args = parser.parse_args()
         
@@ -155,6 +157,7 @@ class StorageTopology:
         self.sort_by = args.sort_by
         self.locate_disk_name = args.locate
         self.locate_off_disk_name = args.locate_off
+        self.locate_all = args.locate_all
         self.locate_all_off = args.locate_all_off
         self.wait_seconds = args.wait
         self.pool_disks_only = args.pool_disks_only
@@ -174,9 +177,6 @@ class StorageTopology:
         if self.wait_seconds is not None:
             if self.wait_seconds < 1 or self.wait_seconds > 60:
                 self.logger.error("Wait time must be between 1 and 60 seconds")
-                sys.exit(1)
-            if not self.locate_disk_name:
-                self.logger.error("--wait can only be used with --locate")
                 sys.exit(1)
 
     def check_command_exists(self, cmd: str) -> bool:
@@ -1619,6 +1619,11 @@ class StorageTopology:
             self.locate_disk(self.locate_off_disk_name, turn_off=True)
             return
             
+        # Handle locate-all if specified
+        if self.locate_all:
+            self.locate_all_disks()
+            return
+            
         # Handle locate-all-off if specified
         if self.locate_all_off:
             self.locate_all_disks_off()
@@ -2249,6 +2254,265 @@ class StorageTopology:
         except subprocess.CalledProcessError as e:
             self.logger.error(f"Error executing {self.controller} command: {e}")
             sys.exit(1)
+
+    def locate_all_disks(self) -> None:
+        """Turn on the identify LED for all disks for a specified time period
+        
+        This method turns on the LEDs for all available disks and then
+        automatically turns them off after the wait period.
+        """
+        # Default to 5 seconds for locate-all if not specified
+        wait_time = self.wait_seconds if self.wait_seconds is not None else 5
+        self.logger.info(f"Turning on identify LED for all disks for {wait_time} seconds")
+        
+        # Detect controller
+        self.logger.info("Detecting available controllers...")
+        self.controller = self.detect_controllers()
+        self.logger.info(f"Selected controller: {self.controller}")
+        
+        if self.controller == "storcli":
+            self._locate_all_disks_storcli(wait_time)
+        elif self.controller in ["sas2ircu", "sas3ircu"]:
+            self._locate_all_disks_sas(wait_time)
+
+    def _locate_all_disks_storcli(self, wait_time: int) -> None:
+        """Turn on all disk LEDs for storcli controller and turn off after specified time"""
+        # For storcli, we need to get all drives from get_storcli_disks()
+        try:
+            disks = self.get_storcli_disks()
+            
+            if not disks:
+                self.logger.error("No disks found in storcli output")
+                sys.exit(1)
+            
+            # Turn on LED for each disk
+            success_count = 0
+            failed_count = 0
+            
+            # Keep track of the disks we successfully turned on the LED for
+            successful_disks = []
+            
+            for disk in disks:
+                try:
+                    controller = disk["controller"]
+                    enclosure = disk["enclosure"]
+                    slot = disk["drive"]
+                    
+                    # Command to turn on the LED
+                    cmd = ["storcli", f"/c{controller}/e{enclosure}/s{slot}", "start", "locate"]
+                    self._execute_command(cmd)
+                    
+                    # Add disk to successful list for later turning off
+                    successful_disks.append({
+                        "controller": controller,
+                        "enclosure": enclosure,
+                        "slot": slot
+                    })
+                    
+                    success_count += 1
+                except subprocess.CalledProcessError as e:
+                    self.logger.warning(f"Failed to turn on LED for c{controller}/e{enclosure}/s{slot}: {e}")
+                    failed_count += 1
+            
+            print(f"Successfully turned on {success_count} disk LEDs")
+            if failed_count > 0:
+                print(f"Failed to turn on {failed_count} disk LEDs")
+                
+            print(f"LEDs will be turned off after {wait_time} seconds...")
+            
+            # Wait for the specified time
+            time.sleep(wait_time)
+            
+            # Turn off all LEDs that were successfully turned on
+            off_success_count = 0
+            off_failed_count = 0
+            
+            for disk in successful_disks:
+                try:
+                    controller = disk["controller"]
+                    enclosure = disk["enclosure"]
+                    slot = disk["slot"]
+                    
+                    # Command to turn off the LED
+                    cmd = ["storcli", f"/c{controller}/e{enclosure}/s{slot}", "stop", "locate"]
+                    self._execute_command(cmd)
+                    off_success_count += 1
+                except subprocess.CalledProcessError as e:
+                    self.logger.warning(f"Failed to turn off LED for c{controller}/e{enclosure}/s{slot}: {e}")
+                    off_failed_count += 1
+            
+            print(f"Successfully turned off {off_success_count} disk LEDs")
+            if off_failed_count > 0:
+                print(f"Failed to turn off {off_failed_count} disk LEDs")
+            
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Error executing storcli command: {e}")
+            sys.exit(1)
+
+    def _locate_all_disks_sas(self, wait_time: int) -> None:
+        """Turn on all disk LEDs for sas2ircu/sas3ircu controllers and turn off after specified time"""
+        # For sas2ircu/sas3ircu, we need to find all enclosure:slot combinations
+        try:
+            cmd = [self.controller, "0", "DISPLAY"]
+            self.logger.info(f"Getting disk information from {self.controller}")
+            output = self._execute_command(cmd, handle_errors=False)
+            
+            # Find all enclosure:slot combinations
+            encl_slots = []
+            enclosure_pattern = re.compile(r'Enclosure #\s+:\s+(\d+)')
+            slot_pattern = re.compile(r'Slot #\s+:\s+(\d+)')
+            
+            current_encl = None
+            current_slot = None
+            
+            for line in output.splitlines():
+                encl_match = enclosure_pattern.search(line)
+                if encl_match:
+                    current_encl = encl_match.group(1)
+                    current_slot = None
+                    continue
+                    
+                slot_match = slot_pattern.search(line)
+                if slot_match and current_encl is not None:
+                    current_slot = slot_match.group(1)
+                    # Only add if both enclosure and slot are present
+                    if current_encl and current_slot:
+                        encl_slots.append(f"{current_encl}:{current_slot}")
+            
+            if not encl_slots:
+                self.logger.error("No disks found in controller output")
+                sys.exit(1)
+                
+            # Using the sas controller's built-in wait functionality if available
+            supports_wait = self.controller_supports_wait()
+            
+            # Turn on LED for each enclosure:slot
+            success_count = 0
+            failed_count = 0
+            
+            # If controller supports wait parameter
+            if supports_wait:
+                for encl_slot in encl_slots:
+                    try:
+                        # Command with wait parameter
+                        cmd = [self.controller, "0", "LOCATE", encl_slot, "ON", "wait", str(wait_time)]
+                        self._execute_command(cmd)
+                        success_count += 1
+                    except subprocess.CalledProcessError as e:
+                        self.logger.warning(f"Failed to turn on LED for {encl_slot}: {e}")
+                        failed_count += 1
+                
+                print(f"Successfully turned on {success_count} disk LEDs")
+                if failed_count > 0:
+                    print(f"Failed to turn on {failed_count} disk LEDs")
+                print(f"LEDs will turn off automatically after {wait_time} seconds")
+                
+            # If controller doesn't support wait parameter
+            else:
+                # For sas2ircu, try using the wait parameter directly
+                if self.controller == "sas2ircu":
+                    # Keep track of disks we successfully turned on
+                    successful_slots = []
+                    
+                    # Turn on all LEDs with wait parameter
+                    for encl_slot in encl_slots:
+                        try:
+                            cmd = [self.controller, "0", "LOCATE", encl_slot, "ON", "wait", str(wait_time)]
+                            self._execute_command(cmd)
+                            successful_slots.append(encl_slot)
+                            success_count += 1
+                        except subprocess.CalledProcessError as e:
+                            # If the wait parameter fails, try without it
+                            try:
+                                cmd = [self.controller, "0", "LOCATE", encl_slot, "ON"]
+                                self._execute_command(cmd)
+                                successful_slots.append(encl_slot)
+                                success_count += 1
+                                self.logger.debug(f"Used non-wait command for {encl_slot}")
+                            except subprocess.CalledProcessError as e2:
+                                self.logger.warning(f"Failed to turn on LED for {encl_slot}: {e2}")
+                                failed_count += 1
+                    
+                    print(f"Successfully turned on {success_count} disk LEDs")
+                    if failed_count > 0:
+                        print(f"Failed to turn on {failed_count} disk LEDs")
+                        
+                    # If we used the wait parameter successfully, we're done
+                    # Otherwise, we need to wait and turn them off manually
+                    if not successful_slots:
+                        return
+                        
+                    print(f"LEDs will be turned off after {wait_time} seconds...")
+                    
+                    # Wait for the specified time
+                    time.sleep(wait_time)
+                    
+                    # Turn off all LEDs that were successfully turned on
+                    off_success_count = 0
+                    off_failed_count = 0
+                    
+                    for encl_slot in successful_slots:
+                        try:
+                            cmd = [self.controller, "0", "LOCATE", encl_slot, "OFF"]
+                            self._execute_command(cmd)
+                            off_success_count += 1
+                        except subprocess.CalledProcessError as e:
+                            self.logger.warning(f"Failed to turn off LED for {encl_slot}: {e}")
+                            off_failed_count += 1
+                    
+                    print(f"Successfully turned off {off_success_count} disk LEDs")
+                    if off_failed_count > 0:
+                        print(f"Failed to turn off {off_failed_count} disk LEDs")
+                else:
+                    # Keep track of disks we successfully turned on
+                    successful_slots = []
+                    
+                    # Turn on all LEDs
+                    for encl_slot in encl_slots:
+                        try:
+                            cmd = [self.controller, "0", "LOCATE", encl_slot, "ON"]
+                            self._execute_command(cmd)
+                            successful_slots.append(encl_slot)
+                            success_count += 1
+                        except subprocess.CalledProcessError as e:
+                            self.logger.warning(f"Failed to turn on LED for {encl_slot}: {e}")
+                            failed_count += 1
+                    
+                    print(f"Successfully turned on {success_count} disk LEDs")
+                    if failed_count > 0:
+                        print(f"Failed to turn on {failed_count} disk LEDs")
+                        
+                    print(f"LEDs will be turned off after {wait_time} seconds...")
+                    
+                    # Wait for the specified time
+                    time.sleep(wait_time)
+                    
+                    # Turn off all LEDs that were successfully turned on
+                    off_success_count = 0
+                    off_failed_count = 0
+                    
+                    for encl_slot in successful_slots:
+                        try:
+                            cmd = [self.controller, "0", "LOCATE", encl_slot, "OFF"]
+                            self._execute_command(cmd)
+                            off_success_count += 1
+                        except subprocess.CalledProcessError as e:
+                            self.logger.warning(f"Failed to turn off LED for {encl_slot}: {e}")
+                            off_failed_count += 1
+                    
+                    print(f"Successfully turned off {off_success_count} disk LEDs")
+                    if off_failed_count > 0:
+                        print(f"Failed to turn off {off_failed_count} disk LEDs")
+                
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Error executing {self.controller} command: {e}")
+            sys.exit(1)
+            
+    def controller_supports_wait(self) -> bool:
+        """Check if the current SAS controller supports the wait parameter for locate command"""
+        # Only sas3ircu is known to support the wait parameter
+        # For sas2ircu, the wait parameter is attempted directly in the locate command
+        return self.controller == "sas3ircu"
 
 
 if __name__ == "__main__":
