@@ -131,6 +131,14 @@ class StorageTopology:
                           help="Update disk description in TrueNAS with location information from detected hardware")
         parser.add_argument("--update-all", action="store_true", 
                           help="Update all disk descriptions in TrueNAS with detected location information")
+        parser.add_argument("--locate", metavar="DISK_NAME",
+                          help="Turn on the identify LED for the specified disk")
+        parser.add_argument("--locate-off", metavar="DISK_NAME",
+                          help="Turn off the identify LED for the specified disk")
+        parser.add_argument("--locate-all-off", action="store_true",
+                          help="Turn off the identify LED for all disks")
+        parser.add_argument("--wait", type=int, metavar="SECONDS", 
+                          help="When used with --locate, specifies the number of seconds the LED should blink (1-60)")
         
         args = parser.parse_args()
         
@@ -143,6 +151,10 @@ class StorageTopology:
         self.update_disk = args.update
         self.update_all_disks = args.update_all
         self.sort_by = args.sort_by
+        self.locate_disk_name = args.locate
+        self.locate_off_disk_name = args.locate_off
+        self.locate_all_off = args.locate_all_off
+        self.wait_seconds = args.wait
         self.pool_disks_only = args.pool_disks_only
         self.pool_name = args.pool
         
@@ -155,6 +167,15 @@ class StorageTopology:
             self.logger.setLevel(logging.WARNING)
             for handler in self.logger.handlers:
                 handler.setLevel(logging.WARNING)
+        
+        # Validate wait seconds (if provided)
+        if self.wait_seconds is not None:
+            if self.wait_seconds < 1 or self.wait_seconds > 60:
+                self.logger.error("Wait time must be between 1 and 60 seconds")
+                sys.exit(1)
+            if not self.locate_disk_name:
+                self.logger.error("--wait can only be used with --locate")
+                sys.exit(1)
 
     def check_command_exists(self, cmd: str) -> bool:
         """Check if a command exists in the system PATH
@@ -1627,6 +1648,21 @@ class StorageTopology:
             self.query_truenas_disk(self.query_disk)
             return
             
+        # Handle disk locate if specified
+        if self.locate_disk_name:
+            self.locate_disk(self.locate_disk_name, wait_seconds=self.wait_seconds)
+            return
+            
+        # Handle disk locate-off if specified
+        if self.locate_off_disk_name:
+            self.locate_disk(self.locate_off_disk_name, turn_off=True)
+            return
+            
+        # Handle locate-all-off if specified
+        if self.locate_all_off:
+            self.locate_all_disks_off()
+            return
+        
         # Load configuration if available
         self.load_config()
         
@@ -1700,7 +1736,7 @@ class StorageTopology:
         if self.update_all_disks:
             self.update_all_truenas_disks(self.combined_disk_complete)
             return
-            
+        
         # Sort the results by enclosure name and physical slot number
         self.logger.info("Sorting results by enclosure and slot...")
         
@@ -1914,6 +1950,186 @@ class StorageTopology:
                     "pool": pool_name,
                     "state": pool_state
                 }
+
+    def locate_disk(self, disk_name: str, turn_off: bool = False, wait_seconds: int = None) -> None:
+        """Turn on or off the identify LED for a disk
+        
+        This method attempts to turn on or off the identify LED for the specified disk
+        using the appropriate controller command (storcli or sas2ircu).
+        
+        Args:
+            disk_name: Name of the disk to locate (e.g., sdad)
+            turn_off: Whether to turn off the LED (default is to turn it on)
+            wait_seconds: Optional number of seconds the LED should blink (1-60)
+        """
+        action = "off" if turn_off else "on"
+        self.logger.info(f"Turning {action} identify LED for disk: {disk_name}")
+        
+        # Remove /dev/ prefix if present
+        if disk_name.startswith('/dev/'):
+            disk_name = disk_name.replace('/dev/', '')
+            self.logger.debug(f"Removed /dev/ prefix, using disk name: {disk_name}")
+        
+        # First, get the disk's serial number
+        try:
+            cmd = ["lsblk", "-dno", "SERIAL", f"/dev/{disk_name}"]
+            self.logger.info(f"Getting serial number for disk {disk_name}")
+            self.logger.debug(f"Executing: {' '.join(cmd)}")
+            serial = subprocess.check_output(cmd, universal_newlines=True).strip()
+            
+            if not serial:
+                self.logger.error(f"Could not get serial number for disk {disk_name}")
+                sys.exit(1)
+                
+            self.logger.info(f"Found serial number for disk {disk_name}: {serial}")
+            
+            # Detect controller
+            self.logger.info("Detecting available controllers...")
+            self.controller = self.detect_controllers()
+            self.logger.info(f"Selected controller: {self.controller}")
+            
+            if self.controller == "storcli":
+                # For storcli, we need to get the enclosure and slot
+                # This would need to be implemented based on storcli syntax
+                self.logger.error("storcli locate functionality not yet implemented")
+                sys.exit(1)
+                
+            elif self.controller in ["sas2ircu", "sas3ircu"]:
+                # For sas2ircu/sas3ircu, we need to find the enclosure and slot from the DISPLAY output
+                # First, get the full output
+                cmd = [self.controller, "0", "DISPLAY"]
+                self.logger.info(f"Getting disk information from {self.controller}")
+                self.logger.debug(f"Executing: {' '.join(cmd)}")
+                output = subprocess.check_output(cmd, universal_newlines=True)
+                
+                # Parse the output to find our disk by serial number
+                enclosure = None
+                slot = None
+                
+                sections = output.split('Device is a')
+                for section in sections:
+                    if serial in section:
+                        # Found our disk, now extract enclosure and slot
+                        encl_match = re.search(r'Enclosure #\s+:\s+(\d+)', section)
+                        slot_match = re.search(r'Slot #\s+:\s+(\d+)', section)
+                        
+                        if encl_match and slot_match:
+                            enclosure = encl_match.group(1)
+                            slot = slot_match.group(1)
+                            break
+                
+                if enclosure is not None and slot is not None:
+                    self.logger.info(f"Found disk {disk_name} in enclosure {enclosure}, slot {slot}")
+                    
+                    # Use sas2ircu or sas3ircu to turn on/off the locate LED
+                    try:
+                        encl_slot = f"{enclosure}:{slot}"
+                        led_action = "OFF" if turn_off else "ON"
+                        
+                        # Build the command based on the wait parameter
+                        if wait_seconds is not None and not turn_off:
+                            cmd = [self.controller, "0", "LOCATE", encl_slot, led_action, "wait", str(wait_seconds)]
+                            wait_msg = f" (will blink for {wait_seconds} seconds)"
+                        else:
+                            cmd = [self.controller, "0", "LOCATE", encl_slot, led_action]
+                            wait_msg = ""
+                            
+                        self.logger.info(f"Executing: {' '.join(cmd)}")
+                        result = subprocess.check_output(cmd, universal_newlines=True)
+                        
+                        if turn_off:
+                            print(f"Successfully turned off locate LED for disk {disk_name}")
+                        else:
+                            print(f"Successfully turned on locate LED for disk {disk_name}{wait_msg}")
+                            if wait_seconds is None:  # Only provide instructions to turn off if not using wait
+                                print("Use the same command with 'OFF' instead of 'ON' to turn off the LED")
+                                print(f"Command: {self.controller} 0 LOCATE {encl_slot} OFF")
+                                print(f"Or use the --locate-off {disk_name} option")
+                    except subprocess.CalledProcessError as e:
+                        self.logger.error(f"Error executing {self.controller} command: {e}")
+                        sys.exit(1)
+                else:
+                    self.logger.error(f"Could not find enclosure and slot for disk {disk_name} with serial {serial}")
+                    sys.exit(1)
+                    
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Error: {e}")
+            sys.exit(1)
+
+    def locate_all_disks_off(self) -> None:
+        """Turn off the identify LED for all disks
+        
+        This method attempts to turn off the identify LED for all disks
+        using the appropriate controller command (sas2ircu or sas3ircu).
+        """
+        self.logger.info("Turning off identify LED for all disks")
+        
+        # Detect controller
+        self.logger.info("Detecting available controllers...")
+        self.controller = self.detect_controllers()
+        self.logger.info(f"Selected controller: {self.controller}")
+        
+        if self.controller == "storcli":
+            # Handle storcli - not implemented yet
+            self.logger.error("storcli locate functionality not yet implemented")
+            sys.exit(1)
+            
+        elif self.controller in ["sas2ircu", "sas3ircu"]:
+            # For sas2ircu/sas3ircu
+            # First, get the full output to find all disks
+            try:
+                cmd = [self.controller, "0", "DISPLAY"]
+                self.logger.info(f"Getting disk information from {self.controller}")
+                self.logger.debug(f"Executing: {' '.join(cmd)}")
+                output = subprocess.check_output(cmd, universal_newlines=True)
+                
+                # Find all enclosure:slot combinations
+                encl_slots = []
+                enclosure_pattern = re.compile(r'Enclosure #\s+:\s+(\d+)')
+                slot_pattern = re.compile(r'Slot #\s+:\s+(\d+)')
+                
+                current_encl = None
+                current_slot = None
+                
+                for line in output.splitlines():
+                    encl_match = enclosure_pattern.search(line)
+                    if encl_match:
+                        current_encl = encl_match.group(1)
+                        current_slot = None
+                        continue
+                        
+                    slot_match = slot_pattern.search(line)
+                    if slot_match and current_encl is not None:
+                        current_slot = slot_match.group(1)
+                        # Only add if both enclosure and slot are present
+                        if current_encl and current_slot:
+                            encl_slots.append(f"{current_encl}:{current_slot}")
+                
+                if not encl_slots:
+                    self.logger.error("No disks found in controller output")
+                    sys.exit(1)
+                
+                # Turn off LED for each enclosure:slot
+                success_count = 0
+                failed_count = 0
+                
+                for encl_slot in encl_slots:
+                    try:
+                        cmd = [self.controller, "0", "LOCATE", encl_slot, "OFF"]
+                        self.logger.info(f"Executing: {' '.join(cmd)}")
+                        result = subprocess.check_output(cmd, universal_newlines=True)
+                        success_count += 1
+                    except subprocess.CalledProcessError as e:
+                        self.logger.warning(f"Failed to turn off LED for {encl_slot}: {e}")
+                        failed_count += 1
+                
+                print(f"Successfully turned off {success_count} disk LEDs")
+                if failed_count > 0:
+                    print(f"Failed to turn off {failed_count} disk LEDs")
+                
+            except subprocess.CalledProcessError as e:
+                self.logger.error(f"Error executing {self.controller} command: {e}")
+                sys.exit(1)
 
 
 if __name__ == "__main__":
