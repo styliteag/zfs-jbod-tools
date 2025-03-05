@@ -4,6 +4,18 @@ Storage Topology Tool
 
 This script identifies physical disk locations by matching controller information with system devices.
 It supports LSI MegaRAID controllers via storcli and LSI SAS controllers via sas2ircu/sas3ircu.
+
+Code Improvements:
+- Reduced duplicate code by adding helper methods for common operations:
+  - _normalize_disk_name: Normalize disk paths by removing '/dev/' prefix
+  - _execute_command: Unified command execution with error handling
+  - _parse_json_output: Centralized JSON parsing with error handling
+- Split large methods into smaller, more focused methods:
+  - _locate_disk_storcli and _locate_disk_sas for controller-specific disk location
+  - _locate_all_disks_off_storcli and _locate_all_disks_off_sas for turning off disk LEDs
+- Improved error handling with consistent patterns
+- Removed duplicate string manipulation code
+- Made command execution handling consistent across methods
 """
 
 import argparse
@@ -201,23 +213,13 @@ class StorageTopology:
         try:
             if controller == "storcli":
                 # Check controller count using storcli
-                # Use binary mode and handle decoding separately with error handling
-                output_bytes = subprocess.check_output(["storcli", "show", "ctrlcount"])
-                
-                # Try to decode with error handling
-                try:
-                    output = output_bytes.decode('utf-8')
-                except UnicodeDecodeError:
-                    # If UTF-8 decoding fails, try with 'latin-1' which can handle any byte value
-                    self.logger.debug("UTF-8 decoding failed for controller check, falling back to latin-1")
-                    output = output_bytes.decode('latin-1')
-                
+                output = self._execute_command(["storcli", "show", "ctrlcount"], handle_errors=False)
                 controller_count_match = re.search(r"Controller Count = (\d+)", output)
                 if controller_count_match and int(controller_count_match.group(1)) > 0:
                     return True
             elif controller in ["sas2ircu", "sas3ircu"]:
                 # Check controller availability using LIST command
-                subprocess.check_output([controller, "LIST"], stderr=subprocess.STDOUT, universal_newlines=True)
+                self._execute_command([controller, "LIST"], handle_errors=False)
                 return True
         except (subprocess.CalledProcessError, FileNotFoundError):
             pass
@@ -267,18 +269,11 @@ class StorageTopology:
         
         try:
             # Run storcli command to get all disk information in JSON format
-            # Use binary mode and handle decoding separately with error handling
-            storcli_output_bytes = subprocess.check_output(["storcli", "/call", "show", "all", "J"])
+            storcli_output = self._execute_command(["storcli", "/call", "show", "all", "J"])
             
-            # Try to decode with error handling
-            try:
-                storcli_output = storcli_output_bytes.decode('utf-8')
-            except UnicodeDecodeError:
-                # If UTF-8 decoding fails, try with 'latin-1' which can handle any byte value
-                self.logger.debug("UTF-8 decoding failed, falling back to latin-1")
-                storcli_output = storcli_output_bytes.decode('latin-1')
-            
-            storcli_json = json.loads(storcli_output)
+            storcli_json = self._parse_json_output(storcli_output, "Failed to parse storcli JSON output")
+            if not storcli_json:
+                return []
             
             self.logger.debug(f"Got storcli output, controllers: {len(storcli_json.get('Controllers', []))}")
             
@@ -517,21 +512,17 @@ class StorageTopology:
             # -d: don't show dependent devices (partitions)
             # -o: specify output columns
             # -J: output in JSON format
-            lsblk_output = subprocess.check_output(
-                ["lsblk", "-p", "-d", "-o", "NAME,WWN,VENDOR,MODEL,REV,SERIAL,SIZE,PTUUID,HCTL,TRAN,TYPE", "-J"],
-                universal_newlines=True
+            lsblk_output = self._execute_command(
+                ["lsblk", "-p", "-d", "-o", "NAME,WWN,VENDOR,MODEL,REV,SERIAL,SIZE,PTUUID,HCTL,TRAN,TYPE", "-J"]
             )
             
             # Parse JSON output
-            try:
-                lsblk_data = json.loads(lsblk_output)
-                self.logger.debug(f"Found {len(lsblk_data.get('blockdevices', []))} block devices")
-                return lsblk_data
-            except json.JSONDecodeError as e:
-                self.logger.error(f"Failed to parse lsblk JSON output: {e}")
-                self.logger.debug(f"Raw lsblk output: {lsblk_output}")
-                # Return empty dict structure to prevent errors downstream
+            lsblk_data = self._parse_json_output(lsblk_output, "Failed to parse lsblk JSON output")
+            if not lsblk_data:
                 return {"blockdevices": []}
+            
+            self.logger.debug(f"Found {len(lsblk_data.get('blockdevices', []))} block devices")
+            return lsblk_data
                 
         except subprocess.SubprocessError as e:
             self.logger.error(f"Failed to execute lsblk command: {e}")
@@ -702,21 +693,12 @@ class StorageTopology:
         
         try:
             # Get enclosure information
-            # Use binary mode and handle decoding separately with error handling
-            enclosure_info_bytes = subprocess.check_output(
-                ["storcli", "/call/eall", "show", "all", "J"]
-            )
+            enclosure_info_output = self._execute_command(["storcli", "/call/eall", "show", "all", "J"])
             
-            # Try to decode with error handling
-            try:
-                enclosure_info_output = enclosure_info_bytes.decode('utf-8')
-            except UnicodeDecodeError:
-                # If UTF-8 decoding fails, try with 'latin-1' which can handle any byte value
-                self.logger.debug("UTF-8 decoding failed for enclosure info, falling back to latin-1")
-                enclosure_info_output = enclosure_info_bytes.decode('latin-1')
+            enclosure_info = self._parse_json_output(enclosure_info_output, "Error parsing storcli enclosure information")
+            if not enclosure_info:
+                return enclosure_map
                 
-            enclosure_info = json.loads(enclosure_info_output)
-            
             # Process each controller
             for controller_data in enclosure_info.get("Controllers", []):
                 response_data = controller_data.get("Response Data", {})
@@ -758,7 +740,8 @@ class StorageTopology:
         try:
             # Get list of controller IDs
             self.logger.debug(f"Running {controller} list command")
-            list_output = subprocess.check_output([controller, "list"], universal_newlines=True)
+            list_output = self._execute_command([controller, "list"])
+            
             self.logger.debug(f"List output: {list_output}")
             controller_ids = []
             
@@ -776,10 +759,7 @@ class StorageTopology:
             # Build a list of controllers and enclosures
             for ctrl_id in controller_ids:
                 self.logger.debug(f"Running {controller} {ctrl_id} display command")
-                display_output = subprocess.check_output(
-                    [controller, ctrl_id, "display"],
-                    universal_newlines=True
-                )
+                display_output = self._execute_command([controller, ctrl_id, "display"])
                 
                 # Extract enclosure information
                 encl_info = ""
@@ -1185,10 +1165,9 @@ class StorageTopology:
         """
         self.logger.info(f"Querying TrueNAS for disk: {disk_name}")
         
-        # Remove /dev/ prefix if present
-        if disk_name != 'all' and disk_name.startswith('/dev/'):
-            disk_name = disk_name.replace('/dev/', '')
-            self.logger.debug(f"Removed /dev/ prefix, using disk name: {disk_name}")
+        # Normalize disk name
+        if disk_name != 'all':
+            disk_name = self._normalize_disk_name(disk_name)
             
         try:
             # Build the query command
@@ -1199,13 +1178,13 @@ class StorageTopology:
                 query_cmd = ["midclt", "call", "disk.query", f'[["name", "=", "{disk_name}"]]']
                 self.logger.info(f"Querying disk: {disk_name}")
                 
-            self.logger.debug(f"Executing command: {' '.join(query_cmd)}")
-            
             # Execute the command
-            result = subprocess.check_output(query_cmd, universal_newlines=True)
+            result = self._execute_command(query_cmd, handle_errors=False)
             
             # Parse the JSON output
-            disk_info = json.loads(result)
+            disk_info = self._parse_json_output(result, "Error parsing JSON response from TrueNAS API")
+            if not disk_info:
+                sys.exit(1)
             
             # Get pool information
             pool_disk_mapping = self.get_pool_disk_mapping()
@@ -1360,9 +1339,6 @@ class StorageTopology:
         except subprocess.CalledProcessError as e:
             self.logger.error(f"Error querying TrueNAS: {e}")
             sys.exit(1)
-        except json.JSONDecodeError as e:
-            self.logger.error(f"Error parsing JSON response: {e}")
-            sys.exit(1)
 
     def update_truenas_disk(self, disk_name: str, location: str, slot: str) -> None:
         """Update disk description in TrueNAS
@@ -1374,18 +1350,17 @@ class StorageTopology:
         """
         self.logger.info(f"Updating TrueNAS disk description for: {disk_name}")
         
-        # Remove /dev/ prefix if present
-        if disk_name.startswith('/dev/'):
-            disk_name = disk_name.replace('/dev/', '')
-            self.logger.debug(f"Removed /dev/ prefix, using disk name: {disk_name}")
+        # Normalize disk name
+        disk_name = self._normalize_disk_name(disk_name)
             
         try:
             # First, query the current disk information
             query_cmd = ["midclt", "call", "disk.query", f'[["name", "=", "{disk_name}"]]']
-            self.logger.debug(f"Executing command: {' '.join(query_cmd)}")
+            result = self._execute_command(query_cmd, handle_errors=False)
             
-            result = subprocess.check_output(query_cmd, universal_newlines=True)
-            disk_info = json.loads(result)
+            disk_info = self._parse_json_output(result, "Error parsing JSON response from TrueNAS API")
+            if not disk_info:
+                sys.exit(1)
             
             if not disk_info:
                 self.logger.error(f"No disk found with name: {disk_name}")
@@ -1421,10 +1396,9 @@ class StorageTopology:
             # Build the update command using the disk identifier
             update_cmd = ["midclt", "call", "disk.update", disk_identifier, 
                           f'{{"description": "{updated_description}"}}']
-            self.logger.debug(f"Executing command: {' '.join(update_cmd)}")
             
             # Execute the update command
-            subprocess.check_output(update_cmd, universal_newlines=True)
+            self._execute_command(update_cmd, handle_errors=False)
             self.logger.info(f"Successfully updated disk description for: {disk_name}")
             
         except subprocess.CalledProcessError as e:
@@ -1532,7 +1506,7 @@ class StorageTopology:
             if len(disk) >= 14:
                 # Store the disk info with both the full path and the short name as keys
                 disk_name = disk[0]
-                short_name = disk_name.replace('/dev/', '') if disk_name.startswith('/dev/') else disk_name
+                short_name = self._normalize_disk_name(disk_name)
                 
                 disk_data = {
                     "dev_name": disk_name,
@@ -1553,10 +1527,11 @@ class StorageTopology:
         try:
             self.logger.info("Retrieving current disk information from TrueNAS")
             query_cmd = ["midclt", "call", "disk.query", "[]"]
-            self.logger.debug(f"Executing command: {' '.join(query_cmd)}")
             
-            result = subprocess.check_output(query_cmd, universal_newlines=True)
-            all_disks = json.loads(result)
+            result = self._execute_command(query_cmd, handle_errors=False)
+            all_disks = self._parse_json_output(result, "Error parsing disk information from TrueNAS API")
+            if not all_disks:
+                sys.exit(1)
             
             updated_count = 0
             skipped_count = 0
@@ -1592,13 +1567,12 @@ class StorageTopology:
                         disk_identifier = truenas_disk.get("identifier")
                         update_cmd = ["midclt", "call", "disk.update", disk_identifier, 
                                     f'{{"description": "{updated_description}"}}']
-                        self.logger.debug(f"Updating disk {disk_name}: {' '.join(update_cmd)}")
                         
                         # Execute the update command
-                        update_result = subprocess.check_output(update_cmd, universal_newlines=True)
+                        update_result = self._execute_command(update_cmd, handle_errors=False)
                         
                         # Parse the result
-                        updated_info = json.loads(update_result)
+                        updated_info = self._parse_json_output(update_result, f"Error parsing update result for disk {disk_name}")
                         updated_count += 1
                         
                         print(f"Updated disk: {disk_name}")
@@ -1614,9 +1588,6 @@ class StorageTopology:
             
         except subprocess.CalledProcessError as e:
             self.logger.error(f"Error updating TrueNAS disks: {e}")
-            sys.exit(1)
-        except json.JSONDecodeError as e:
-            self.logger.error(f"Error parsing JSON response: {e}")
             sys.exit(1)
 
     def run(self) -> None:
@@ -1952,11 +1923,80 @@ class StorageTopology:
                     "state": pool_state
                 }
 
+    def _normalize_disk_name(self, disk_name: str) -> str:
+        """Normalize disk name by removing /dev/ prefix if present
+        
+        Args:
+            disk_name: The disk name to normalize
+            
+        Returns:
+            str: Normalized disk name
+        """
+        if disk_name and disk_name.startswith('/dev/'):
+            disk_name = disk_name.replace('/dev/', '')
+            self.logger.debug(f"Removed /dev/ prefix, using disk name: {disk_name}")
+        return disk_name
+    
+    def _execute_command(self, cmd: List[str], decode_method: str = 'utf-8', 
+                        handle_errors: bool = True) -> str:
+        """Execute a command and return its output
+        
+        Args:
+            cmd: Command to execute as list of strings
+            decode_method: Method to decode command output (utf-8 or latin-1)
+            handle_errors: Whether to handle errors or let them propagate
+            
+        Returns:
+            str: Command output as string
+            
+        Raises:
+            subprocess.CalledProcessError: If command fails and handle_errors is False
+        """
+        self.logger.debug(f"Executing command: {' '.join(cmd)}")
+        
+        try:
+            # Use binary mode to handle decoding separately
+            output_bytes = subprocess.check_output(cmd)
+            
+            # Try to decode with specified method, falling back to latin-1 if needed
+            try:
+                output = output_bytes.decode(decode_method)
+            except UnicodeDecodeError:
+                self.logger.debug(f"{decode_method} decoding failed, falling back to latin-1")
+                output = output_bytes.decode('latin-1')
+                
+            return output
+            
+        except subprocess.CalledProcessError as e:
+            if handle_errors:
+                self.logger.error(f"Error executing command {' '.join(cmd)}: {e}")
+                if self.verbose:
+                    import traceback
+                    traceback.print_exc()
+                return ""
+            else:
+                raise
+    
+    def _parse_json_output(self, output: str, error_msg: str) -> Dict[str, Any]:
+        """Parse JSON output with error handling
+        
+        Args:
+            output: String output to parse as JSON
+            error_msg: Error message to log if parsing fails
+            
+        Returns:
+            Dict[str, Any]: Parsed JSON data or empty dict on failure
+        """
+        try:
+            return json.loads(output)
+        except json.JSONDecodeError as e:
+            self.logger.error(f"{error_msg}: {e}")
+            if self.verbose:
+                self.logger.debug(f"Raw output: {output}")
+            return {}
+
     def locate_disk(self, disk_name: str, turn_off: bool = False, wait_seconds: int = None) -> None:
         """Turn on or off the identify LED for a disk
-        
-        This method attempts to turn on or off the identify LED for the specified disk
-        using the appropriate controller command (storcli or sas2ircu).
         
         Args:
             disk_name: Name of the disk to locate (e.g., sdad)
@@ -1966,17 +2006,14 @@ class StorageTopology:
         action = "off" if turn_off else "on"
         self.logger.info(f"Turning {action} identify LED for disk: {disk_name}")
         
-        # Remove /dev/ prefix if present
-        if disk_name.startswith('/dev/'):
-            disk_name = disk_name.replace('/dev/', '')
-            self.logger.debug(f"Removed /dev/ prefix, using disk name: {disk_name}")
+        # Normalize disk name
+        disk_name = self._normalize_disk_name(disk_name)
         
         # First, get the disk's serial number
         try:
             cmd = ["lsblk", "-dno", "SERIAL", f"/dev/{disk_name}"]
             self.logger.info(f"Getting serial number for disk {disk_name}")
-            self.logger.debug(f"Executing: {' '.join(cmd)}")
-            serial = subprocess.check_output(cmd, universal_newlines=True).strip()
+            serial = self._execute_command(cmd, handle_errors=False).strip()
             
             if not serial:
                 self.logger.error(f"Could not get serial number for disk {disk_name}")
@@ -1990,124 +2027,137 @@ class StorageTopology:
             self.logger.info(f"Selected controller: {self.controller}")
             
             if self.controller == "storcli":
-                # For storcli, we need to get the enclosure and slot using the get_storcli_disks method
-                disks = self.get_storcli_disks()
-                
-                # Find our disk by serial number
-                disk_info = None
-                for disk in disks:
-                    if disk["sn"] == serial:
-                        disk_info = disk
-                        break
-                
-                if disk_info:
-                    controller = disk_info["controller"]
-                    enclosure = disk_info["enclosure"]
-                    slot = disk_info["drive"]
-                    
-                    self.logger.info(f"Found disk {disk_name} in controller {controller}, enclosure {enclosure}, slot {slot}")
-                    
-                    # Use storcli to turn on/off the locate LED
-                    try:
-                        locate_action = "stop" if turn_off else "start"
-                        
-                        # Build the command
-                        cmd = ["storcli", f"/c{controller}/e{enclosure}/s{slot}", f"{locate_action}", "locate"]
-                        self.logger.info(f"Executing: {' '.join(cmd)}")
-                        result = subprocess.check_output(cmd, universal_newlines=True)
-                        
-                        if turn_off:
-                            print(f"Successfully turned off locate LED for disk {disk_name}")
-                        else:
-                            print(f"Successfully turned on locate LED for disk {disk_name}")
-                            if wait_seconds is not None:
-                                # Storcli doesn't support built-in wait time, so implement wait and auto-turn-off
-                                print(f"LED will be turned off automatically after {wait_seconds} seconds")
-                                # Wait for the specified time
-                                time.sleep(wait_seconds)
-                                # Turn off the LED
-                                off_cmd = ["storcli", f"/c{controller}/e{enclosure}/s{slot}", "stop", "locate"]
-                                self.logger.info(f"Executing: {' '.join(off_cmd)}")
-                                subprocess.check_output(off_cmd, universal_newlines=True)
-                                print(f"LED for disk {disk_name} has been automatically turned off")
-                            else:
-                                print("Use the same command with --locate-off to turn off the LED")
-                                print(f"Command: python3 storage_topology.py --locate-off {disk_name}")
-                    except subprocess.CalledProcessError as e:
-                        self.logger.error(f"Error executing storcli command: {e}")
-                        sys.exit(1)
-                else:
-                    self.logger.error(f"Could not find disk {disk_name} with serial {serial} in storcli output")
-                    sys.exit(1)
-                    
+                self._locate_disk_storcli(disk_name, serial, turn_off, wait_seconds)
             elif self.controller in ["sas2ircu", "sas3ircu"]:
-                # For sas2ircu/sas3ircu, we need to find the enclosure and slot from the DISPLAY output
-                # First, get the full output
-                cmd = [self.controller, "0", "DISPLAY"]
-                self.logger.info(f"Getting disk information from {self.controller}")
-                self.logger.debug(f"Executing: {' '.join(cmd)}")
-                output = subprocess.check_output(cmd, universal_newlines=True)
-                
-                # Parse the output to find our disk by serial number
-                enclosure = None
-                slot = None
-                
-                sections = output.split('Device is a')
-                for section in sections:
-                    if serial in section:
-                        # Found our disk, now extract enclosure and slot
-                        encl_match = re.search(r'Enclosure #\s+:\s+(\d+)', section)
-                        slot_match = re.search(r'Slot #\s+:\s+(\d+)', section)
-                        
-                        if encl_match and slot_match:
-                            enclosure = encl_match.group(1)
-                            slot = slot_match.group(1)
-                            break
-                
-                if enclosure is not None and slot is not None:
-                    self.logger.info(f"Found disk {disk_name} in enclosure {enclosure}, slot {slot}")
-                    
-                    # Use sas2ircu or sas3ircu to turn on/off the locate LED
-                    try:
-                        encl_slot = f"{enclosure}:{slot}"
-                        led_action = "OFF" if turn_off else "ON"
-                        
-                        # Build the command based on the wait parameter
-                        if wait_seconds is not None and not turn_off:
-                            cmd = [self.controller, "0", "LOCATE", encl_slot, led_action, "wait", str(wait_seconds)]
-                            wait_msg = f" (will blink for {wait_seconds} seconds)"
-                        else:
-                            cmd = [self.controller, "0", "LOCATE", encl_slot, led_action]
-                            wait_msg = ""
-                            
-                        self.logger.info(f"Executing: {' '.join(cmd)}")
-                        result = subprocess.check_output(cmd, universal_newlines=True)
-                        
-                        if turn_off:
-                            print(f"Successfully turned off locate LED for disk {disk_name}")
-                        else:
-                            print(f"Successfully turned on locate LED for disk {disk_name}{wait_msg}")
-                            if wait_seconds is None:  # Only provide instructions to turn off if not using wait
-                                print("Use the same command with 'OFF' instead of 'ON' to turn off the LED")
-                                print(f"Command: {self.controller} 0 LOCATE {encl_slot} OFF")
-                                print(f"Or use the --locate-off {disk_name} option")
-                    except subprocess.CalledProcessError as e:
-                        self.logger.error(f"Error executing {self.controller} command: {e}")
-                        sys.exit(1)
-                else:
-                    self.logger.error(f"Could not find enclosure and slot for disk {disk_name} with serial {serial}")
-                    sys.exit(1)
+                self._locate_disk_sas(disk_name, serial, turn_off, wait_seconds)
                     
         except subprocess.CalledProcessError as e:
             self.logger.error(f"Error: {e}")
             sys.exit(1)
+            
+    def _locate_disk_storcli(self, disk_name: str, serial: str, turn_off: bool, wait_seconds: int) -> None:
+        """Handle disk location using storcli controller
+        
+        Args:
+            disk_name: Disk name
+            serial: Disk serial number
+            turn_off: Whether to turn off the LED
+            wait_seconds: Optional wait time in seconds
+        """
+        # For storcli, we need to get the enclosure and slot using the get_storcli_disks method
+        disks = self.get_storcli_disks()
+        
+        # Find our disk by serial number
+        disk_info = None
+        for disk in disks:
+            if disk["sn"] == serial:
+                disk_info = disk
+                break
+        
+        if disk_info:
+            controller = disk_info["controller"]
+            enclosure = disk_info["enclosure"]
+            slot = disk_info["drive"]
+            
+            self.logger.info(f"Found disk {disk_name} in controller {controller}, enclosure {enclosure}, slot {slot}")
+            
+            # Use storcli to turn on/off the locate LED
+            try:
+                locate_action = "stop" if turn_off else "start"
+                
+                # Build the command
+                cmd = ["storcli", f"/c{controller}/e{enclosure}/s{slot}", f"{locate_action}", "locate"]
+                self._execute_command(cmd, handle_errors=False)
+                
+                if turn_off:
+                    print(f"Successfully turned off locate LED for disk {disk_name}")
+                else:
+                    print(f"Successfully turned on locate LED for disk {disk_name}")
+                    if wait_seconds is not None:
+                        # Storcli doesn't support built-in wait time, so implement wait and auto-turn-off
+                        print(f"LED will be turned off automatically after {wait_seconds} seconds")
+                        # Wait for the specified time
+                        time.sleep(wait_seconds)
+                        # Turn off the LED
+                        off_cmd = ["storcli", f"/c{controller}/e{enclosure}/s{slot}", "stop", "locate"]
+                        self._execute_command(off_cmd, handle_errors=False)
+                        print(f"LED for disk {disk_name} has been automatically turned off")
+                    else:
+                        print("Use the same command with --locate-off to turn off the LED")
+                        print(f"Command: python3 storage_topology.py --locate-off {disk_name}")
+            except subprocess.CalledProcessError as e:
+                self.logger.error(f"Error executing storcli command: {e}")
+                sys.exit(1)
+        else:
+            self.logger.error(f"Could not find disk {disk_name} with serial {serial} in storcli output")
+            sys.exit(1)
+            
+    def _locate_disk_sas(self, disk_name: str, serial: str, turn_off: bool, wait_seconds: int) -> None:
+        """Handle disk location using sas2ircu/sas3ircu controller
+        
+        Args:
+            disk_name: Disk name
+            serial: Disk serial number
+            turn_off: Whether to turn off the LED
+            wait_seconds: Optional wait time in seconds
+        """
+        # For sas2ircu/sas3ircu, we need to find the enclosure and slot from the DISPLAY output
+        # First, get the full output
+        cmd = [self.controller, "0", "DISPLAY"]
+        self.logger.info(f"Getting disk information from {self.controller}")
+        output = self._execute_command(cmd, handle_errors=False)
+        
+        # Parse the output to find our disk by serial number
+        enclosure = None
+        slot = None
+        
+        sections = output.split('Device is a')
+        for section in sections:
+            if serial in section:
+                # Found our disk, now extract enclosure and slot
+                encl_match = re.search(r'Enclosure #\s+:\s+(\d+)', section)
+                slot_match = re.search(r'Slot #\s+:\s+(\d+)', section)
+                
+                if encl_match and slot_match:
+                    enclosure = encl_match.group(1)
+                    slot = slot_match.group(1)
+                    break
+        
+        if enclosure is not None and slot is not None:
+            self.logger.info(f"Found disk {disk_name} in enclosure {enclosure}, slot {slot}")
+            
+            # Use sas2ircu or sas3ircu to turn on/off the locate LED
+            try:
+                encl_slot = f"{enclosure}:{slot}"
+                led_action = "OFF" if turn_off else "ON"
+                
+                # Build the command based on the wait parameter
+                if wait_seconds is not None and not turn_off:
+                    cmd = [self.controller, "0", "LOCATE", encl_slot, led_action, "wait", str(wait_seconds)]
+                    wait_msg = f" (will blink for {wait_seconds} seconds)"
+                else:
+                    cmd = [self.controller, "0", "LOCATE", encl_slot, led_action]
+                    wait_msg = ""
+                    
+                self._execute_command(cmd, handle_errors=False)
+                
+                if turn_off:
+                    print(f"Successfully turned off locate LED for disk {disk_name}")
+                else:
+                    print(f"Successfully turned on locate LED for disk {disk_name}{wait_msg}")
+                    if wait_seconds is None:  # Only provide instructions to turn off if not using wait
+                        print("Use the same command with 'OFF' instead of 'ON' to turn off the LED")
+                        print(f"Command: {self.controller} 0 LOCATE {encl_slot} OFF")
+                        print(f"Or use the --locate-off {disk_name} option")
+            except subprocess.CalledProcessError as e:
+                self.logger.error(f"Error executing {self.controller} command: {e}")
+                sys.exit(1)
+        else:
+            self.logger.error(f"Could not find enclosure and slot for disk {disk_name} with serial {serial}")
+            sys.exit(1)
 
     def locate_all_disks_off(self) -> None:
-        """Turn off the identify LED for all disks
-        
-        This method attempts to turn off the identify LED for all disks
-        using the appropriate controller command (storcli, sas2ircu, or sas3ircu).
-        """
+        """Turn off the identify LED for all disks"""
         self.logger.info("Turning off identify LED for all disks")
         
         # Detect controller
@@ -2116,96 +2166,100 @@ class StorageTopology:
         self.logger.info(f"Selected controller: {self.controller}")
         
         if self.controller == "storcli":
-            # For storcli, we need to get all drives from get_storcli_disks()
-            try:
-                disks = self.get_storcli_disks()
-                
-                if not disks:
-                    self.logger.error("No disks found in storcli output")
-                    sys.exit(1)
-                
-                # Turn off LED for each disk
-                success_count = 0
-                failed_count = 0
-                
-                for disk in disks:
-                    try:
-                        controller = disk["controller"]
-                        enclosure = disk["enclosure"]
-                        slot = disk["drive"]
-                        
-                        cmd = ["storcli", f"/c{controller}/e{enclosure}/s{slot}", "stop", "locate"]
-                        self.logger.info(f"Executing: {' '.join(cmd)}")
-                        result = subprocess.check_output(cmd, universal_newlines=True)
-                        success_count += 1
-                    except subprocess.CalledProcessError as e:
-                        self.logger.warning(f"Failed to turn off LED for c{controller}/e{enclosure}/s{slot}: {e}")
-                        failed_count += 1
-                
-                print(f"Successfully turned off {success_count} disk LEDs")
-                if failed_count > 0:
-                    print(f"Failed to turn off {failed_count} disk LEDs")
-                
-            except subprocess.CalledProcessError as e:
-                self.logger.error(f"Error executing storcli command: {e}")
+            self._locate_all_disks_off_storcli()
+        elif self.controller in ["sas2ircu", "sas3ircu"]:
+            self._locate_all_disks_off_sas()
+            
+    def _locate_all_disks_off_storcli(self) -> None:
+        """Turn off all disk LEDs for storcli controller"""
+        # For storcli, we need to get all drives from get_storcli_disks()
+        try:
+            disks = self.get_storcli_disks()
+            
+            if not disks:
+                self.logger.error("No disks found in storcli output")
                 sys.exit(1)
             
-        elif self.controller in ["sas2ircu", "sas3ircu"]:
-            # For sas2ircu/sas3ircu
-            # First, get the full output to find all disks
-            try:
-                cmd = [self.controller, "0", "DISPLAY"]
-                self.logger.info(f"Getting disk information from {self.controller}")
-                self.logger.debug(f"Executing: {' '.join(cmd)}")
-                output = subprocess.check_output(cmd, universal_newlines=True)
-                
-                # Find all enclosure:slot combinations
-                encl_slots = []
-                enclosure_pattern = re.compile(r'Enclosure #\s+:\s+(\d+)')
-                slot_pattern = re.compile(r'Slot #\s+:\s+(\d+)')
-                
-                current_encl = None
-                current_slot = None
-                
-                for line in output.splitlines():
-                    encl_match = enclosure_pattern.search(line)
-                    if encl_match:
-                        current_encl = encl_match.group(1)
-                        current_slot = None
-                        continue
-                        
-                    slot_match = slot_pattern.search(line)
-                    if slot_match and current_encl is not None:
-                        current_slot = slot_match.group(1)
-                        # Only add if both enclosure and slot are present
-                        if current_encl and current_slot:
-                            encl_slots.append(f"{current_encl}:{current_slot}")
-                
-                if not encl_slots:
-                    self.logger.error("No disks found in controller output")
-                    sys.exit(1)
-                
-                # Turn off LED for each enclosure:slot
-                success_count = 0
-                failed_count = 0
-                
-                for encl_slot in encl_slots:
-                    try:
-                        cmd = [self.controller, "0", "LOCATE", encl_slot, "OFF"]
-                        self.logger.info(f"Executing: {' '.join(cmd)}")
-                        result = subprocess.check_output(cmd, universal_newlines=True)
-                        success_count += 1
-                    except subprocess.CalledProcessError as e:
-                        self.logger.warning(f"Failed to turn off LED for {encl_slot}: {e}")
-                        failed_count += 1
-                
-                print(f"Successfully turned off {success_count} disk LEDs")
-                if failed_count > 0:
-                    print(f"Failed to turn off {failed_count} disk LEDs")
-                
-            except subprocess.CalledProcessError as e:
-                self.logger.error(f"Error executing {self.controller} command: {e}")
+            # Turn off LED for each disk
+            success_count = 0
+            failed_count = 0
+            
+            for disk in disks:
+                try:
+                    controller = disk["controller"]
+                    enclosure = disk["enclosure"]
+                    slot = disk["drive"]
+                    
+                    cmd = ["storcli", f"/c{controller}/e{enclosure}/s{slot}", "stop", "locate"]
+                    self._execute_command(cmd)
+                    success_count += 1
+                except subprocess.CalledProcessError as e:
+                    self.logger.warning(f"Failed to turn off LED for c{controller}/e{enclosure}/s{slot}: {e}")
+                    failed_count += 1
+            
+            print(f"Successfully turned off {success_count} disk LEDs")
+            if failed_count > 0:
+                print(f"Failed to turn off {failed_count} disk LEDs")
+            
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Error executing storcli command: {e}")
+            sys.exit(1)
+            
+    def _locate_all_disks_off_sas(self) -> None:
+        """Turn off all disk LEDs for sas2ircu/sas3ircu controllers"""
+        # For sas2ircu/sas3ircu
+        # First, get the full output to find all disks
+        try:
+            cmd = [self.controller, "0", "DISPLAY"]
+            self.logger.info(f"Getting disk information from {self.controller}")
+            output = self._execute_command(cmd, handle_errors=False)
+            
+            # Find all enclosure:slot combinations
+            encl_slots = []
+            enclosure_pattern = re.compile(r'Enclosure #\s+:\s+(\d+)')
+            slot_pattern = re.compile(r'Slot #\s+:\s+(\d+)')
+            
+            current_encl = None
+            current_slot = None
+            
+            for line in output.splitlines():
+                encl_match = enclosure_pattern.search(line)
+                if encl_match:
+                    current_encl = encl_match.group(1)
+                    current_slot = None
+                    continue
+                    
+                slot_match = slot_pattern.search(line)
+                if slot_match and current_encl is not None:
+                    current_slot = slot_match.group(1)
+                    # Only add if both enclosure and slot are present
+                    if current_encl and current_slot:
+                        encl_slots.append(f"{current_encl}:{current_slot}")
+            
+            if not encl_slots:
+                self.logger.error("No disks found in controller output")
                 sys.exit(1)
+            
+            # Turn off LED for each enclosure:slot
+            success_count = 0
+            failed_count = 0
+            
+            for encl_slot in encl_slots:
+                try:
+                    cmd = [self.controller, "0", "LOCATE", encl_slot, "OFF"]
+                    self._execute_command(cmd)
+                    success_count += 1
+                except subprocess.CalledProcessError as e:
+                    self.logger.warning(f"Failed to turn off LED for {encl_slot}: {e}")
+                    failed_count += 1
+            
+            print(f"Successfully turned off {success_count} disk LEDs")
+            if failed_count > 0:
+                print(f"Failed to turn off {failed_count} disk LEDs")
+                
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Error executing {self.controller} command: {e}")
+            sys.exit(1)
 
 
 if __name__ == "__main__":
