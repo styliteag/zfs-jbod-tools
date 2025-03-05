@@ -1026,7 +1026,7 @@ class StorageTopology:
                             enclosure_name = f"Enclosure-{enclosure}"  # Others numbered by ID
                     else:
                         # Fallback for unknown enclosures
-                        enclosure_name = f"Unknown-{enclosure}"
+                        enclosure_name = f"-"
                     
                     # Default slot calculation (simple 1-based index)
                     encslot = drive_num + 1
