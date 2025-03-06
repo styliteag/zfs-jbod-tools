@@ -198,12 +198,12 @@ enclosures:
   - id: "500605b0:07459eb0"  # Logical ID from the controller
     name: "Internal"         # Human-readable name
     offset: 100              # Offset to add to the real slot number
-    start_slot: 0            # Starting slot number
+    start_slot: 1            # Starting slot number
 
   - id: "50030480:00a0dabf"
     name: "BayFront"
     offset: 0
-    start_slot: 0
+    start_slot: 1
 
 # Custom disk mappings by serial number
 disks:

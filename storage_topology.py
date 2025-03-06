@@ -869,7 +869,7 @@ class StorageTopology:
             Tuple[int, int]: The physical slot number and logical disk number
         """
         # Get configuration values
-        offset = config_entry.get("offset", 0)
+        offset = config_entry.get("offset", 1)
         start_slot = config_entry.get("start_slot", hw_start_slot)
         
         # Calculate the real drive number by subtracting the hardware start slot
