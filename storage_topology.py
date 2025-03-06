@@ -1333,116 +1333,46 @@ class StorageTopology:
             self.logger.error(f"Error querying TrueNAS: {e}")
             sys.exit(1)
 
-    def update_truenas_disk(self, disk_name: str = None, location: str = None, slot: str = None, disknr: str = None,
-                           disk_inventory: List[List[str]] = None) -> None:
-        """Update disk description(s) in TrueNAS
+    def update_truenas_disk(self, disk_name: str = None, location: str = None, slot: str = None, disknr: str = None) -> None:
+        """Update a single disk description in TrueNAS
         
-        This method can update either a single disk or all disks with location information.
+        This method updates a single disk with location information.
         
         Args:
-            disk_name: Name of the specific disk to update (optional)
-            location: Physical location description for single disk update (optional)
-            slot: Slot number for single disk update (optional)
-            disknr: Disk number for single disk update (optional)
-            disk_inventory: List of disk information for updating all disks (optional)
+            disk_name: Name of the specific disk to update
+            location: Physical location description for the disk
+            slot: Slot number for the disk
+            disknr: Disk number for the disk
         """
-        # Handle bulk update case
-        if disk_inventory is not None:
-            self.logger.info("Updating all TrueNAS disk descriptions with location information")
+        if not disk_name or not location or not slot:
+            self.logger.error("Missing required parameters: disk_name, location, and slot are required")
+            return
             
-            # Convert disk_inventory to a dictionary for easier access
-            disk_info = {}
-            for disk in disk_inventory:
-                if len(disk) >= 14:
-                    # Store the disk info with both the full path and the short name as keys
-                    disk_name_entry = disk[0]
-                    short_name = self._normalize_disk_name(disk_name_entry)
-                    
-                    disk_data = {
-                        "dev_name": disk_name_entry,
-                        "enclosure_name": disk[10],
-                        "encslot": disk[11],
-                        "encdisk": disk[12],
-                        "location": disk[13]
-                    }
-                    
-                    # Store with both full path and short name for easier lookup
-                    disk_info[disk_name_entry] = disk_data
-                    disk_info[short_name] = disk_data
+        self.logger.info(f"Updating TrueNAS disk description for: {disk_name} with location: {location} and slot: {slot}")
+        
+        # Normalize disk name
+        norm_disk_name = self._normalize_disk_name(disk_name)
+            
+        try:
+            # First, query the current disk information
+            query_cmd = ["midclt", "call", "disk.query", f'[["name", "=", "{norm_disk_name}"]]']
+            result = self._execute_command(query_cmd, handle_errors=False)
+            
+            disk_info = self._parse_json_output(result, "Error parsing JSON response from TrueNAS API")
+            if not disk_info:
+                sys.exit(1)
             
             if not disk_info:
-                self.logger.error("No disk location information available.")
+                self.logger.error(f"No disk found with name: {norm_disk_name}")
                 sys.exit(1)
                 
-            # Get all disks from TrueNAS
-            try:
-                self.logger.info("Retrieving current disk information from TrueNAS")
-                query_cmd = ["midclt", "call", "disk.query", "[]"]
-                
-                result = self._execute_command(query_cmd, handle_errors=False)
-                all_disks = self._parse_json_output(result, "Error parsing disk information from TrueNAS API")
-                if not all_disks:
-                    sys.exit(1)
-                
-                updated_count = 0
-                skipped_count = 0
-                
-                # Process each disk
-                for truenas_disk in all_disks:
-                    disk_name_entry = truenas_disk.get("name")
-                    
-                    # If we have location information for this disk
-                    if disk_name_entry in disk_info:
-                        location_info = disk_info[disk_name_entry]
-                        enclosure = location_info.get("enclosure_name", "")
-                        encslot = location_info.get("encslot", "")
-                        encdisk = location_info.get("encdisk", "")
-                        
-                        # Only update if we have both enclosure and slot information
-                        if enclosure and encslot:
-                            self.logger.info(f"Updating disk: {disk_name_entry} with location: {enclosure}, slot: {encslot}, disk: {encdisk}")
-                            self._update_disk_description(truenas_disk, enclosure, encslot, encdisk)
-                            updated_count += 1
-                            print(f"Updated disk: {disk_name_entry}")
-                        else:
-                            self.logger.warning(f"Skipping disk {disk_name_entry}: Missing enclosure or slot information")
-                            skipped_count += 1
-                    else:
-                        self.logger.debug(f"Skipping disk {disk_name_entry}: No location information available")
-                        skipped_count += 1
-                
-                print(f"\nSummary: Updated {updated_count} disks, skipped {skipped_count} disks")
-                
-            except subprocess.CalledProcessError as e:
-                self.logger.error(f"Error updating TrueNAS disks: {e}")
-                sys.exit(1)
-                
-        elif disk_name and location and slot:
-            self.logger.info(f"Updating TrueNAS disk description for: {disk_name} with location: {location} and slot: {slot}")
+            # Update the disk
+            self._update_disk_description(disk_info[0], location, slot, disknr)
+            self.logger.info(f"Successfully updated disk description for: {norm_disk_name}")
             
-            # Normalize disk name
-            norm_disk_name = self._normalize_disk_name(disk_name)
-                
-            try:
-                # First, query the current disk information
-                query_cmd = ["midclt", "call", "disk.query", f'[["name", "=", "{norm_disk_name}"]]']
-                result = self._execute_command(query_cmd, handle_errors=False)
-                
-                disk_info = self._parse_json_output(result, "Error parsing JSON response from TrueNAS API")
-                if not disk_info:
-                    sys.exit(1)
-                
-                if not disk_info:
-                    self.logger.error(f"No disk found with name: {norm_disk_name}")
-                    sys.exit(1)
-                    
-                # Update the disk
-                self._update_disk_description(disk_info[0], location, slot, disknr)
-                self.logger.info(f"Successfully updated disk description for: {norm_disk_name}")
-                
-            except subprocess.CalledProcessError as e:
-                self.logger.error(f"Error updating TrueNAS disk: {e}")
-                sys.exit(1)
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Error updating TrueNAS disk: {e}")
+            sys.exit(1)
 
     def _update_disk_description(self, disk_info: Dict[str, Any], enclosure: str, slot: str, disk: str) -> None:
         """Helper method to update a single disk's description
@@ -1493,8 +1423,75 @@ class StorageTopology:
         Args:
             disk_inventory: List of disk information including physical locations
         """
-        # Delegate to the unified method
-        self.update_truenas_disk(disk_inventory=disk_inventory)
+        self.logger.info("Updating all TrueNAS disk descriptions with location information")
+        
+        # Convert disk_inventory to a dictionary for easier access
+        disk_info = {}
+        for disk in disk_inventory:
+            if len(disk) >= 14:
+                # Store the disk info with both the full path and the short name as keys
+                disk_name_entry = disk[0]
+                short_name = self._normalize_disk_name(disk_name_entry)
+                
+                disk_data = {
+                    "dev_name": disk_name_entry,
+                    "enclosure_name": disk[10],
+                    "encslot": disk[11],
+                    "encdisk": disk[12],
+                    "location": disk[13]
+                }
+                
+                # Store with both full path and short name for easier lookup
+                disk_info[disk_name_entry] = disk_data
+                disk_info[short_name] = disk_data
+        
+        if not disk_info:
+            self.logger.error("No disk location information available.")
+            sys.exit(1)
+            
+        # Get all disks from TrueNAS
+        try:
+            self.logger.info("Retrieving current disk information from TrueNAS")
+            query_cmd = ["midclt", "call", "disk.query", "[]"]
+            
+            result = self._execute_command(query_cmd, handle_errors=False)
+            all_disks = self._parse_json_output(result, "Error parsing disk information from TrueNAS API")
+            if not all_disks:
+                sys.exit(1)
+            
+            updated_count = 0
+            skipped_count = 0
+            
+            # Process each disk
+            for truenas_disk in all_disks:
+                disk_name_entry = truenas_disk.get("name")
+                
+                # If we have location information for this disk
+                if disk_name_entry in disk_info:
+                    location_info = disk_info[disk_name_entry]
+                    enclosure = location_info.get("enclosure_name", "")
+                    encslot = location_info.get("encslot", "")
+                    encdisk = location_info.get("encdisk", "")
+                    
+                    # Only update if we have both enclosure and slot information
+                    if enclosure and encslot:
+                        self.logger.info(f"Updating disk: {disk_name_entry} with location: {enclosure}, slot: {encslot}, disk: {encdisk}")
+                        # Call update_truenas_disk for each disk
+                        self.update_truenas_disk(disk_name=disk_name_entry, location=enclosure, slot=encslot, disknr=encdisk)
+                        updated_count += 1
+                        print(f"Updated disk: {disk_name_entry}")
+                    else:
+                        self.logger.warning(f"Skipping disk {disk_name_entry}: Missing enclosure or slot information")
+                        skipped_count += 1
+                else:
+                    self.logger.debug(f"Skipping disk {disk_name_entry}: No location information available")
+                    skipped_count += 1
+            
+            print(f"\nSummary: Updated {updated_count} disks, skipped {skipped_count} disks")
+            
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"Error updating TrueNAS disks: {e}")
+            sys.exit(1)
 
     def load_config(self) -> None:
         """Load configuration file
