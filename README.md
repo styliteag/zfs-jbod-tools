@@ -26,7 +26,15 @@ Options:
   -z, --zpool          Display ZFS pool information
   -v, --verbose        Enable verbose output
   -c, --controller=X   Force use of specific controller (storcli, sas2ircu, sas3ircu)
-  -f, --force          Force refresh of cached data
+  --query [DISK_NAME]  Query disk information (use without arguments to query all disks)
+  --sort-by=FIELD     Sort query results by field (disk, serial, model, size, description, pool)
+  --pool-disks-only   When querying, show only disks that are part of ZFS pools
+  --pool=POOL_NAME    When querying, show only disks that are part of the specified ZFS pool
+  --locate=DISK_NAME  Turn on the identify LED for the specified disk
+  --locate-off=DISK   Turn off the identify LED for the specified disk
+  --locate-all        Turn on identify LED for all disks
+  --locate-all-off    Turn off identify LED for all disks
+  --wait=SECONDS      Number of seconds to blink LED (1-60, for locate commands)
 ```
 
 ### Example Output
@@ -139,6 +147,41 @@ The output shows:
 - Logical disk number
 - Complete location string (useful for identification)
 
+#### Query Output (with --query option)
+```
+Disk Information for all disks:
+Found 17 disks
+--------------------------------------------------------------------------------
+Disk    Pool           Serial         Model                Size      Description
+--------------------------------------------------------------------------------
+sda     storage_pool   WD-WMAYP6774  WDC WD5003ABYZ      5.00 TB   BayFront;SLOT:1
+sdb     storage_pool   WD-WMAYP6881  WDC WD5003ABYZ      5.00 TB   BayFront;SLOT:2
+sdc     Not in pool    PBG1GZJX      HUS724040ALS640     4.00 TB   Front-Bay;SLOT:0
+--------------------------------------------------------------------------------
+Sorted by: Pool
+
+Pool Summary:
+  storage_pool: 2 disks
+```
+
+#### Query with ZPool Integration (with --query --zpool)
+```
+Disk Information for all disks in ZFS pools:
+Found 2 disks
+--------------------------------------------------------------------------------
+Disk    Pool           Serial         Model                Size      Description
+--------------------------------------------------------------------------------
+sda     storage_pool   WD-WMAYP6774  WDC WD5003ABYZ      5.00 TB   BayFront;SLOT:1
+sdb     storage_pool   WD-WMAYP6881  WDC WD5003ABYZ      5.00 TB   BayFront;SLOT:2
+--------------------------------------------------------------------------------
+Sorted by: Pool
+
+Pool Summary:
+  storage_pool: 2 disks
+  state: ONLINE
+  status: All pools are healthy
+```
+
 ## Configuration
 
 The `storage_topology.conf` file allows customization of enclosure mappings and disk locations. It uses YAML syntax to define:
@@ -180,3 +223,4 @@ disks:
 - Storage controller utilities (storcli, sas2ircu, or sas3ircu)
 - lsblk (for block device information)
 - ZFS utilities (optional, for pool integration) 
+- midctl, only for --query to query the TrueNAS cli
