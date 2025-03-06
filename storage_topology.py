@@ -1362,6 +1362,7 @@ class StorageTopology:
                         "dev_name": disk_name_entry,
                         "enclosure_name": disk[10],
                         "encslot": disk[11],
+                        "encdisk": disk[12],
                         "location": disk[13]
                     }
                     
@@ -1394,12 +1395,13 @@ class StorageTopology:
                     if disk_name_entry in disk_info:
                         location_info = disk_info[disk_name_entry]
                         enclosure = location_info.get("enclosure_name", "")
-                        slot = location_info.get("encslot", "")
-                        disk = location_info.get("location", "")
+                        encslot = location_info.get("encslot", "")
+                        encdisk = location_info.get("encdisk", "")
                         
                         # Only update if we have both enclosure and slot information
-                        if enclosure and slot:
-                            self._update_disk_description(truenas_disk, enclosure, slot, disk)
+                        if enclosure and encslot:
+                            self.logger.info(f"Updating disk: {disk_name_entry} with location: {enclosure}, slot: {encslot}, disk: {encdisk}")
+                            self._update_disk_description(truenas_disk, enclosure, encslot, encdisk)
                             updated_count += 1
                             print(f"Updated disk: {disk_name_entry}")
                         else:
@@ -2231,12 +2233,12 @@ class StorageTopology:
                     # Extract location information from the disk data
                     enclosure_name = disk[10]  # Enclosure name at index 10
                     encslot = disk[11]         # Slot number at index 11
-                    disk = disk[12]           # Disk number at index 12
+                    encdisk = disk[12]           # Disk number at index 12
                     
                     if enclosure_name and encslot:
                         self.logger.info(f"Found location information for disk {self.update_disk}: {enclosure_name}, slot {encslot}")
                         # Update the disk with the location information from disk_inventory
-                        self.update_truenas_disk(self.update_disk, enclosure_name, encslot, disk)
+                        self.update_truenas_disk(self.update_disk, enclosure_name, encslot, encdisk)
                         disk_found = True
                         break
             
