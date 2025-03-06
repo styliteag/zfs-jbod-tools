@@ -56,7 +56,7 @@ class StorageTopology:
         disks_table_json (List[Dict]): Disk information from controller
         lsblk_json (Dict): System block device information
         combined_disk (List[List]): Combined disk information
-        combined_disk_complete (List[List]): Complete disk information with locations
+        disk_inventory (List[List]): Complete disk information with locations
         enclosures (Dict): Custom enclosure configuration
         custom_mappings (Dict): Custom disk mappings
         query_disk (str): Query disk name
@@ -78,7 +78,7 @@ class StorageTopology:
         self.disks_table_json = {}
         self.lsblk_json = {}
         self.combined_disk = []
-        self.combined_disk_complete = []
+        self.disk_inventory = []
         self.enclosures = {}
         self.custom_mappings = {}
         self.query_disk = None
@@ -898,6 +898,9 @@ class StorageTopology:
         """
         self.logger.info("Mapping physical locations")
         
+        # Initialize the result list
+        disk_inventory = []
+        
         # Get enclosure type mapping by detecting the enclosure types based on controller
         enclosure_map = self.detect_enclosure_types(self.disks_table_json, controller)
         
@@ -939,8 +942,6 @@ class StorageTopology:
         # Convert to sorted list for ordered access
         enclosures = sorted(list(unique_enclosures))
         self.logger.debug(f"Unique enclosures: {enclosures}")
-        
-        combined_disk_complete = []
         
         # Process all disks to map their physical locations
         for disk in combined_disk:
@@ -1036,9 +1037,9 @@ class StorageTopology:
                 str(encslot), str(encdisk), location
             ]
             
-            combined_disk_complete.append(entry)
+            disk_inventory.append(entry)
         
-        return combined_disk_complete
+        return disk_inventory
 
     def get_disk_from_partition(self, dev: str) -> str:
         """Get disk from partition name"""
@@ -1049,13 +1050,13 @@ class StorageTopology:
         else:
             return re.sub(r"[0-9]+$", "", dev)
 
-    def display_zpool_info(self, combined_disk_complete: List[List[str]]) -> None:
+    def display_zpool_info(self, disk_inventory: List[List[str]]) -> None:
         """Display ZFS pool disk information"""
         self.logger.info("Displaying ZFS pool information")
         
-        # Convert combined_disk_complete to dictionary for easier lookup
+        # Convert disk_inventory to dictionary for easier lookup
         disk_info = {}
-        for disk in combined_disk_complete:
+        for disk in disk_inventory:
             if len(disk) >= 14:
                 disk_info[disk[0]] = {
                     "dev_name": disk[0],
@@ -1333,7 +1334,7 @@ class StorageTopology:
             sys.exit(1)
 
     def update_truenas_disk(self, disk_name: str = None, location: str = None, slot: str = None, disknr: str = None,
-                           combined_disk_complete: List[List[str]] = None) -> None:
+                           disk_inventory: List[List[str]] = None) -> None:
         """Update disk description(s) in TrueNAS
         
         This method can update either a single disk or all disks with location information.
@@ -1342,15 +1343,16 @@ class StorageTopology:
             disk_name: Name of the specific disk to update (optional)
             location: Physical location description for single disk update (optional)
             slot: Slot number for single disk update (optional)
-            combined_disk_complete: List of disk information for updating all disks (optional)
+            disknr: Disk number for single disk update (optional)
+            disk_inventory: List of disk information for updating all disks (optional)
         """
         # Handle bulk update case
-        if combined_disk_complete is not None:
+        if disk_inventory is not None:
             self.logger.info("Updating all TrueNAS disk descriptions with location information")
             
-            # Convert combined_disk_complete to a dictionary for easier access
+            # Convert disk_inventory to a dictionary for easier access
             disk_info = {}
-            for disk in combined_disk_complete:
+            for disk in disk_inventory:
                 if len(disk) >= 14:
                     # Store the disk info with both the full path and the short name as keys
                     disk_name_entry = disk[0]
@@ -1368,7 +1370,7 @@ class StorageTopology:
                     disk_info[short_name] = disk_data
             
             if not disk_info:
-                self.logger.error("No disk location information available. Run the tool without --update-all first.")
+                self.logger.error("No disk location information available.")
                 sys.exit(1)
                 
             # Get all disks from TrueNAS
@@ -1393,7 +1395,7 @@ class StorageTopology:
                         location_info = disk_info[disk_name_entry]
                         enclosure = location_info.get("enclosure_name", "")
                         slot = location_info.get("encslot", "")
-                        disk = location_info.get("disk", "")
+                        disk = location_info.get("location", "")
                         
                         # Only update if we have both enclosure and slot information
                         if enclosure and slot:
@@ -1459,7 +1461,7 @@ class StorageTopology:
         current_description = disk_info.get("description", "").strip()
         
         # Create the location information string
-        location_info = f"Loc:x{enclosure};SLOT:{slot};DISK:{disk}"
+        location_info = f"Loc:{enclosure};SLOT:{slot};DISK:{disk}"
         
         # Remove any existing location information (Loc:*) from the description
         import re
@@ -1480,17 +1482,17 @@ class StorageTopology:
         result = self._execute_command(update_cmd, handle_errors=False)
         return self._parse_json_output(result, f"Error parsing update result for disk {disk_info.get('name')}")
 
-    def update_all_truenas_disks(self, combined_disk_complete: List[List[str]]) -> None:
+    def update_all_truenas_disks(self, disk_inventory: List[List[str]]) -> None:
         """Update all disk descriptions in TrueNAS with detected location information
         
         This method takes the combined disk information that includes physical locations
         and updates all disks in TrueNAS with their respective location information.
         
         Args:
-            combined_disk_complete: List of disk information including physical locations
+            disk_inventory: List of disk information including physical locations
         """
         # Delegate to the unified method
-        self.update_truenas_disk(combined_disk_complete=combined_disk_complete)
+        self.update_truenas_disk(disk_inventory=disk_inventory)
 
     def load_config(self) -> None:
         """Load configuration file
@@ -2180,12 +2182,37 @@ class StorageTopology:
         
         # Map disk locations
         self.logger.info("Mapping physical locations...")
-        self.combined_disk_complete = self.map_disk_locations(self.combined_disk, self.controller)
+        self.disk_inventory = self.map_disk_locations(self.combined_disk, self.controller)
         
-        # Debug: Print the structure of combined_disk_complete
-        self.logger.debug("Combined disk complete structure:")
-        for disk in self.combined_disk_complete:
+        # Debug: Print the structure of disk_inventory
+        self.logger.debug("Disk inventory structure:")
+        for disk in self.disk_inventory:
             self.logger.debug(f"Disk entry: {disk}")
+        
+        # Handle disk query if specified
+        if self.query_disk:
+            disk_name = self.query_disk
+            disk_name_with_prefix = f"/dev/{disk_name}"
+            
+            # Find the disk in disk_inventory
+            disk_found = False
+            for disk in self.disk_inventory:
+                if len(disk) >= 14 and (disk[0] == disk_name_with_prefix or disk[0] == disk_name):
+                    # Extract location information from the disk data
+                    enclosure_name = disk[10]
+                    slot = disk[11]
+                    location = disk[13]
+                    
+                    # Update the disk with the location information from disk_inventory
+                    self.query_truenas_disk(disk_name)
+                    disk_found = True
+                    break
+            
+            if not disk_found:
+                self.logger.error(f"No location information found for disk: {disk_name}")
+                sys.exit(1)
+                
+            return
         
         # Handle TrueNAS update if specified
         if self.update_disk:
@@ -2197,9 +2224,9 @@ class StorageTopology:
                 disk_name_with_prefix = disk_name
                 disk_name = disk_name.replace('/dev/', '')
             
-            # Find the disk in combined_disk_complete
+            # Find the disk in disk_inventory
             disk_found = False
-            for disk in self.combined_disk_complete:
+            for disk in self.disk_inventory:
                 if len(disk) >= 14 and (disk[0] == disk_name_with_prefix or disk[0] == disk_name):
                     # Extract location information from the disk data
                     enclosure_name = disk[10]  # Enclosure name at index 10
@@ -2208,7 +2235,7 @@ class StorageTopology:
                     
                     if enclosure_name and encslot:
                         self.logger.info(f"Found location information for disk {self.update_disk}: {enclosure_name}, slot {encslot}")
-                        # Update the disk with the location information from combined_disk_complete
+                        # Update the disk with the location information from disk_inventory
                         self.update_truenas_disk(self.update_disk, enclosure_name, encslot, disk)
                         disk_found = True
                         break
@@ -2221,7 +2248,7 @@ class StorageTopology:
         
         # Handle update all disks if specified
         if self.update_all_disks:
-            self.update_all_truenas_disks(self.combined_disk_complete)
+            self.update_all_truenas_disks(self.disk_inventory)
             return
         
         # Sort the results by enclosure name and physical slot number
@@ -2240,12 +2267,12 @@ class StorageTopology:
                 
             return (enc_name, slot_num)
             
-        self.combined_disk_complete.sort(key=get_sort_key)
+        self.disk_inventory.sort(key=get_sort_key)
         
         # Display the results
         if self.json_output:
             output = []
-            for disk in self.combined_disk_complete:
+            for disk in self.disk_inventory:
                 if len(disk) >= 14:
                     output.append({
                         "dev_name": disk[0],
@@ -2272,7 +2299,7 @@ class StorageTopology:
             
             # Calculate dynamic column widths based on data and headers
             widths = [len(h) for h in headers]
-            for disk in self.combined_disk_complete:
+            for disk in self.disk_inventory:
                 for i, val in enumerate(disk):
                     if i < len(widths):
                         widths[i] = max(widths[i], len(str(val)))
@@ -2285,7 +2312,7 @@ class StorageTopology:
             print(header_line)
             
             # Print data
-            for disk in self.combined_disk_complete:
+            for disk in self.disk_inventory:
                 row_parts = []
                 for i, val in enumerate(disk):
                     if i < len(widths):
@@ -2295,7 +2322,7 @@ class StorageTopology:
         
         # Show ZFS pool information if requested
         if self.show_zpool:
-            self.display_zpool_info(self.combined_disk_complete)
+            self.display_zpool_info(self.disk_inventory)
 
     def get_pool_disk_mapping(self) -> Dict[str, Dict[str, str]]:
         """Get a mapping of disks to their ZFS pools
