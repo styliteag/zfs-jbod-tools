@@ -1332,7 +1332,7 @@ class StorageTopology:
             self.logger.error(f"Error querying TrueNAS: {e}")
             sys.exit(1)
 
-    def update_truenas_disk(self, disk_name: str = None, location: str = None, slot: str = None, 
+    def update_truenas_disk(self, disk_name: str = None, location: str = None, slot: str = None, disknr: str = None,
                            combined_disk_complete: List[List[str]] = None) -> None:
         """Update disk description(s) in TrueNAS
         
@@ -1393,10 +1393,11 @@ class StorageTopology:
                         location_info = disk_info[disk_name_entry]
                         enclosure = location_info.get("enclosure_name", "")
                         slot = location_info.get("encslot", "")
+                        disk = location_info.get("disk", "")
                         
                         # Only update if we have both enclosure and slot information
                         if enclosure and slot:
-                            self._update_disk_description(truenas_disk, enclosure, slot)
+                            self._update_disk_description(truenas_disk, enclosure, slot, disk)
                             updated_count += 1
                             print(f"Updated disk: {disk_name_entry}")
                         else:
@@ -1412,9 +1413,8 @@ class StorageTopology:
                 self.logger.error(f"Error updating TrueNAS disks: {e}")
                 sys.exit(1)
                 
-        # Handle single disk update case
         elif disk_name and location and slot:
-            self.logger.info(f"Updating TrueNAS disk description for: {disk_name}")
+            self.logger.info(f"Updating TrueNAS disk description for: {disk_name} with location: {location} and slot: {slot}")
             
             # Normalize disk name
             norm_disk_name = self._normalize_disk_name(disk_name)
@@ -1433,23 +1433,21 @@ class StorageTopology:
                     sys.exit(1)
                     
                 # Update the disk
-                self._update_disk_description(disk_info[0], location, slot)
+                self._update_disk_description(disk_info[0], location, slot, disknr)
                 self.logger.info(f"Successfully updated disk description for: {norm_disk_name}")
                 
             except subprocess.CalledProcessError as e:
                 self.logger.error(f"Error updating TrueNAS disk: {e}")
                 sys.exit(1)
-        else:
-            self.logger.error("Invalid parameters: Either provide disk_name/location/slot or combined_disk_complete")
-            sys.exit(1)
-    
-    def _update_disk_description(self, disk_info: Dict[str, Any], enclosure: str, slot: str) -> None:
+
+    def _update_disk_description(self, disk_info: Dict[str, Any], enclosure: str, slot: str, disk: str) -> None:
         """Helper method to update a single disk's description
         
         Args:
             disk_info: Dictionary containing the disk information
             enclosure: Enclosure name/location
             slot: Slot number
+            disk: Disk name (not used for description anymore)
         """
         # Get the disk identifier which is required for updates
         disk_identifier = disk_info.get("identifier")
@@ -1461,7 +1459,7 @@ class StorageTopology:
         current_description = disk_info.get("description", "").strip()
         
         # Create the location information string
-        location_info = f"Loc:{enclosure};SLOT:{slot}"
+        location_info = f"Loc:x{enclosure};SLOT:{slot};DISK:{disk}"
         
         # Remove any existing location information (Loc:*) from the description
         import re
@@ -1473,6 +1471,7 @@ class StorageTopology:
         else:
             updated_description = location_info
         
+        self.logger.info(f"Updating disk {disk_info.get('name')} with description: {updated_description}")
         # Build the update command using the disk identifier
         update_cmd = ["midclt", "call", "disk.update", disk_identifier, 
                      f'{{"description": "{updated_description}"}}']
@@ -2205,11 +2204,12 @@ class StorageTopology:
                     # Extract location information from the disk data
                     enclosure_name = disk[10]  # Enclosure name at index 10
                     encslot = disk[11]         # Slot number at index 11
+                    disk = disk[12]           # Disk number at index 12
                     
                     if enclosure_name and encslot:
                         self.logger.info(f"Found location information for disk {self.update_disk}: {enclosure_name}, slot {encslot}")
                         # Update the disk with the location information from combined_disk_complete
-                        self.update_truenas_disk(self.update_disk, enclosure_name, encslot)
+                        self.update_truenas_disk(self.update_disk, enclosure_name, encslot, disk)
                         disk_found = True
                         break
             
