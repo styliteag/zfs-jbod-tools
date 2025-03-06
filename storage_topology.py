@@ -57,7 +57,7 @@ class StorageTopology:
         lsblk_json (Dict): System block device information
         combined_disk (List[List]): Combined disk information
         combined_disk_complete (List[List]): Complete disk information with locations
-        enclosure_offsets (Dict): Custom enclosure configuration
+        enclosures (Dict): Custom enclosure configuration
         custom_mappings (Dict): Custom disk mappings
         query_disk (str): Query disk name
         update_disk (Tuple[str, str, str]): Update disk information
@@ -79,7 +79,7 @@ class StorageTopology:
         self.lsblk_json = {}
         self.combined_disk = []
         self.combined_disk_complete = []
-        self.enclosure_offsets = {}
+        self.enclosures = {}
         self.custom_mappings = {}
         self.query_disk = None
         self.update_disk = None
@@ -838,18 +838,18 @@ class StorageTopology:
             Dict[str, Any]: The configuration entry for the enclosure, or None if not found
         """
         # First try to find configuration by product ID (for storcli)
-        if product_id and product_id in self.enclosure_offsets:
-            config_entry = self.enclosure_offsets[product_id]
+        if product_id and product_id in self.enclosures:
+            config_entry = self.enclosures[product_id]
             self.logger.debug(f"Found config for product ID {product_id}: {config_entry}")
             return config_entry
         # Then try by logical ID
-        elif logical_id and logical_id in self.enclosure_offsets:
-            config_entry = self.enclosure_offsets[logical_id]
+        elif logical_id and logical_id in self.enclosures:
+            config_entry = self.enclosures[logical_id]
             self.logger.debug(f"Found config for logical ID {logical_id}: {config_entry}")
             return config_entry
         # Finally try by enclosure ID
-        elif enclosure and enclosure in self.enclosure_offsets:
-            config_entry = self.enclosure_offsets[enclosure]
+        elif enclosure and enclosure in self.enclosures:
+            config_entry = self.enclosures[enclosure]
             self.logger.debug(f"Found config for enclosure ID {enclosure}: {config_entry}")
             return config_entry
         
@@ -869,17 +869,16 @@ class StorageTopology:
             Tuple[int, int]: The physical slot number and logical disk number
         """
         # Get configuration values
-        offset = config_entry.get("offset", 1)
         start_slot = config_entry.get("start_slot", hw_start_slot)
         
         # Calculate the real drive number by subtracting the hardware start slot
-        real_drive_num = drive_num - hw_start_slot
+        real_drive_num = drive_num - hw_start_slot # -1 to account for the fact that the drive number is 0-based
         if real_drive_num < 0:
             real_drive_num = drive_num  # Fallback if start_slot is incorrect
         
         # Calculate physical slot and logical disk numbers
-        physical_slot = real_drive_num + offset + start_slot
-        logical_disk = real_drive_num + start_slot
+        physical_slot = real_drive_num + start_slot
+        logical_disk = real_drive_num + start_slot - 1 # -1 to account for the fact that the drive/disk number is 0-based
         
         return physical_slot, logical_disk
 
@@ -966,7 +965,7 @@ class StorageTopology:
             # Skip if drive is not a valid slot number
             try:
                 # Convert drive to integer if possible, otherwise set to 0
-                drive_num = int(drive) if drive and drive not in ["null", "None", "N/A", "xxx"] else 0
+                drive_num = int(drive) if drive and drive not in ["null", "None", "N/A"] else 0
             except (ValueError, TypeError):
                 drive_num = 0
             
@@ -988,7 +987,7 @@ class StorageTopology:
                 # Get enclosure type and logical ID
                 encl_type = encl_info.get("type", "Unknown")
                 logical_id = encl_info.get("logical_id", "")
-                hw_start_slot = encl_info.get("start_slot", 0)
+                hw_start_slot = encl_info.get("start_slot", 1)
                 
                 # Get configuration entry for this enclosure
                 config_entry = self._get_enclosure_config(logical_id, enclosure, encl_type)
@@ -1029,7 +1028,7 @@ class StorageTopology:
             
             # Create the location string in a standardized format for output
             #location = f"{enclosure_name};SLOT:{encslot};DISK:{encdisk}"
-            location = f"{enclosure_name};SLOT:{encslot}"
+            location = f"{enclosure_name};SLOT:{encslot};DISK:{encdisk}"
             # Create the complete entry with all information including the mapped location
             entry = [
                 dev_name, name, slot, controller_id, enclosure, drive,
@@ -1466,7 +1465,7 @@ class StorageTopology:
         
         # Remove any existing location information (Loc:*) from the description
         import re
-        new_description = re.sub(r'Loc:[^;]*;SLOT:[0-9]+', '', current_description).strip()
+        new_description = re.sub(r'Loc:\S+', '', current_description).strip()
         
         # If there's still description text left, use it and append the location
         if new_description:
@@ -1499,7 +1498,7 @@ class StorageTopology:
         
         This method loads the configuration file from ./storage_topology.conf (YAML format).
         The configuration file can contain:
-        - Enclosure definitions with names, offsets, and slot mappings
+        - Enclosure definitions with names, and slot mappings
         - Custom disk mappings by serial number
         
         Example config:
@@ -1507,8 +1506,7 @@ class StorageTopology:
         enclosures:
           - id: "SAS3x48Front"    # Enclosure ID, logical_id, or product ID for identification
             name: "Front JBOD"    # Human-readable name
-            offset: 0             # Offset for physical slot numbering
-            start_slot: 0         # Starting slot number for logical numbering
+            start_slot: 1         # Starting slot number for logical numbering (1-based)
             max_slots: 48         # Maximum number of slots in this enclosure
           
         disks:
@@ -1538,13 +1536,12 @@ class StorageTopology:
                                 continue
                                 
                             # Store the enclosure configuration
-                            self.enclosure_offsets[encl_id] = {
+                            self.enclosures[encl_id] = {
                                 'name': encl_config.get('name', f"Enclosure-{encl_id}"),
-                                'offset': int(encl_config.get('offset', 0)),
-                                'start_slot': int(encl_config.get('start_slot', 0)),
+                                'start_slot': int(encl_config.get('start_slot', 1)),
                                 'max_slots': int(encl_config.get('max_slots', 0))
                             }
-                            self.logger.debug(f"Loaded enclosure config for {encl_id}: {self.enclosure_offsets[encl_id]}")
+                            self.logger.debug(f"Loaded enclosure config for {encl_id}: {self.enclosures[encl_id]}")
                     
                     # Load custom disk mappings by serial number
                     if 'disks' in config:
