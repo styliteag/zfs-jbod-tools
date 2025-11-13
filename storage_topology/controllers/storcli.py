@@ -38,15 +38,24 @@ class StorcliController(BaseController):
     def is_available(self) -> bool:
         """Check if storcli/storcli2 controller is available"""
         if not self.cmd:
+            self.logger.debug("No storcli command found")
             return False
 
         try:
             output = self._execute_command([self.cmd, "show", "ctrlcount"], handle_errors=False)
+            self.logger.debug(f"storcli output: {output[:200]}")
             controller_count_match = re.search(r"Controller Count = (\d+)", output)
-            if controller_count_match and int(controller_count_match.group(1)) > 0:
-                return True
-        except Exception:
-            pass
+            if controller_count_match:
+                count = int(controller_count_match.group(1))
+                self.logger.debug(f"Found {count} controllers")
+                if count > 0:
+                    return True
+                else:
+                    self.logger.debug("Controller count is 0")
+            else:
+                self.logger.debug("Could not find 'Controller Count' pattern in output")
+        except Exception as e:
+            self.logger.debug(f"Error checking storcli availability: {e}")
 
         return False
 

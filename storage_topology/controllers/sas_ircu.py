@@ -30,12 +30,16 @@ class SasIrcuController(BaseController):
     def is_available(self) -> bool:
         """Check if sas2ircu/sas3ircu controller is available"""
         if not self._check_command_exists(self.cmd):
+            self.logger.debug(f"{self.cmd} command not found")
             return False
 
         try:
-            self._execute_command([self.cmd, "LIST"], handle_errors=False)
+            output = self._execute_command([self.cmd, "LIST"], handle_errors=False)
+            self.logger.debug(f"{self.cmd} LIST output: {output[:200]}")
+            # If command executed without error, controller is available
             return True
-        except Exception:
+        except Exception as e:
+            self.logger.debug(f"Error checking {self.cmd} availability: {e}")
             return False
 
     def get_disks(self) -> List[Disk]:
