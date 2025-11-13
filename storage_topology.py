@@ -66,6 +66,7 @@ class StorageTopology:
         sort_by (str): Field to sort query results by
         pool_disks_only (bool): Flag to show only disks that are part of ZFS pools
         pool_name (str): Name of the ZFS pool to filter by
+        enclosure_id (str): Enclosure ID to show information for
         logger (Logger): Application logger
     """
 
@@ -89,6 +90,7 @@ class StorageTopology:
         self.sort_by = "pool"
         self.pool_disks_only = False
         self.pool_name = None
+        self.enclosure_id = None
         self.logger = self._setup_logger()
 
     def _setup_logger(self) -> logging.Logger:
@@ -145,6 +147,8 @@ class StorageTopology:
                           help="Turn off the identify LED for all disks")
         parser.add_argument("--wait", type=int, metavar="SECONDS",
                           help="When used with --locate, specifies the number of seconds the LED should blink (1-60). For --locate-all, default is 5 seconds.")
+        parser.add_argument("--enclosure", nargs='?', const='all', metavar="ENCLOSURE_ID",
+                          help="Show enclosure information and generate config snippet. Use without arguments to show all enclosures.")
         
         args = parser.parse_args()
         
@@ -164,6 +168,7 @@ class StorageTopology:
         self.wait_seconds = args.wait
         self.pool_disks_only = args.pool_disks_only
         self.pool_name = args.pool
+        self.enclosure_id = args.enclosure
         
         # Configure logger based on verbosity/quiet settings
         if self.verbose:
@@ -900,6 +905,274 @@ class StorageTopology:
             self.logger.warning(f"Error getting {self.storcli_cmd} enclosure information: {e}")
         
         return enclosure_map
+
+    def show_enclosure_info(self, enclosure_id: str = None) -> None:
+        """Show enclosure information and generate config snippet
+        
+        Args:
+            enclosure_id: Optional enclosure ID to show. If None or 'all', shows all enclosures.
+        """
+        # Detect controller first
+        self.controller = self.detect_controllers()
+        if not self.controller:
+            self.logger.error("No controller found")
+            sys.exit(1)
+        
+        if self.controller == "storcli":
+            self._show_storcli_enclosure_info(enclosure_id)
+        elif self.controller in ["sas2ircu", "sas3ircu"]:
+            self._show_sas_enclosure_info(enclosure_id)
+        else:
+            self.logger.error(f"Unsupported controller: {self.controller}")
+            sys.exit(1)
+
+    def _show_storcli_enclosure_info(self, enclosure_id: str = None) -> None:
+        """Show storcli/storcli2 enclosure information and generate config snippet"""
+        try:
+            # Get enclosure information
+            enclosure_info_output = self._execute_command([self.storcli_cmd, "/call/eall", "show", "all", "J"])
+            enclosure_info = self._parse_json_output(enclosure_info_output, "Error parsing storcli enclosure information")
+            
+            if not enclosure_info:
+                self.logger.error("Could not get enclosure information")
+                return
+            
+            enclosures_found = []
+            
+            # Process each controller
+            for controller_data in enclosure_info.get("Controllers", []):
+                response_data = controller_data.get("Response Data", {})
+                command_status = controller_data.get("Command Status", {})
+                controller_num = str(command_status.get("Controller", ""))
+                
+                # Check for storcli2 format: "Enclosure List" array
+                enclosure_list = response_data.get("Enclosure List", [])
+                if enclosure_list:
+                    # storcli2 format
+                    for enclosure_entry in enclosure_list:
+                        eid = str(enclosure_entry.get("EID", ""))
+                        if enclosure_id and enclosure_id != "all" and eid != enclosure_id:
+                            continue
+                        
+                        # Try to get detailed enclosure info including SAS address
+                        sas_address = ""
+                        try:
+                            detail_output = self._execute_command(
+                                [self.storcli_cmd, f"/c{controller_num}/e{eid}", "show", "all", "J"],
+                                handle_errors=False
+                            )
+                            detail_json = self._parse_json_output(detail_output, "")
+                            if detail_json:
+                                for ctrl in detail_json.get("Controllers", []):
+                                    resp = ctrl.get("Response Data", {})
+                                    # Look for SAS address in various places
+                                    basics = resp.get("Basics", {})
+                                    sas_address = basics.get("SAS Address", "")
+                                    if not sas_address:
+                                        sas_address = basics.get("SASAddress", "")
+                        except Exception as e:
+                            self.logger.debug(f"Could not get detailed info for enclosure {eid}: {e}")
+                        
+                        enclosures_found.append({
+                            "controller": controller_num,
+                            "eid": eid,
+                            "product_id": enclosure_entry.get("ProdID", "").strip(),
+                            "slots": str(enclosure_entry.get("Slots", "0")),
+                            "state": enclosure_entry.get("State", ""),
+                            "sas_address": sas_address.strip() if sas_address else ""
+                        })
+                else:
+                    # storcli format: "Enclosure" keys
+                    enclosure_keys = [k for k in response_data.keys() if k.startswith("Enclosure")]
+                    for enclosure_key in enclosure_keys:
+                        controller_match = re.search(r"/c(\d+)/e(\d+)", enclosure_key)
+                        if controller_match:
+                            ctrl_num = controller_match.group(1)
+                            eid = controller_match.group(2)
+                            
+                            if enclosure_id and enclosure_id != "all" and eid != enclosure_id:
+                                continue
+                            
+                            enclosure_data = response_data.get(enclosure_key, {})
+                            inquiry_data = enclosure_data.get("Inquiry Data", {})
+                            product_id = inquiry_data.get("Product Identification", "").rstrip()
+                            properties = enclosure_data.get("Properties", [{}])[0] if enclosure_data.get("Properties") else {}
+                            num_slots = str(properties.get("Slots", "0"))
+                            
+                            # Try to get SAS address
+                            sas_address = ""
+                            try:
+                                detail_output = self._execute_command(
+                                    [self.storcli_cmd, f"/c{ctrl_num}/e{eid}", "show", "all", "J"],
+                                    handle_errors=False
+                                )
+                                detail_json = self._parse_json_output(detail_output, "")
+                                if detail_json:
+                                    for ctrl in detail_json.get("Controllers", []):
+                                        resp = ctrl.get("Response Data", {})
+                                        basics = resp.get("Basics", {})
+                                        sas_address = basics.get("SAS Address", "")
+                                        if not sas_address:
+                                            sas_address = basics.get("SASAddress", "")
+                            except Exception as e:
+                                self.logger.debug(f"Could not get detailed info for enclosure {eid}: {e}")
+                            
+                            enclosures_found.append({
+                                "controller": ctrl_num,
+                                "eid": eid,
+                                "product_id": product_id,
+                                "slots": num_slots,
+                                "state": properties.get("State", ""),
+                                "sas_address": sas_address.strip() if sas_address else ""
+                            })
+            
+            if not enclosures_found:
+                if enclosure_id and enclosure_id != "all":
+                    print(f"No enclosure found with ID: {enclosure_id}")
+                else:
+                    print("No enclosures found")
+                return
+            
+            # Display enclosure information
+            print("\n" + "="*80)
+            print("Enclosure Information")
+            print("="*80)
+            
+            for enc in enclosures_found:
+                print(f"\nController: {enc['controller']}")
+                print(f"Enclosure ID (EID): {enc['eid']}")
+                print(f"Product ID: {enc['product_id']}")
+                print(f"Slots: {enc['slots']}")
+                print(f"State: {enc['state']}")
+                if enc['sas_address']:
+                    print(f"SAS Address: {enc['sas_address']}")
+            
+            # Generate config snippet
+            print("\n" + "="*80)
+            print("Config Snippet for storage_topology.conf")
+            print("="*80)
+            print("\n# Add the following to the 'enclosures:' section:\n")
+            
+            for enc in enclosures_found:
+                # Format SAS address for config (remove 0x prefix and format as logical ID)
+                logical_id = ""
+                if enc['sas_address']:
+                    # Remove 0x prefix and format as logical ID (first 8 chars : next 8 chars)
+                    sas_clean = enc['sas_address'].replace("0x", "").replace(" ", "").lower()
+                    if len(sas_clean) >= 16:
+                        logical_id = f"{sas_clean[:8]}:{sas_clean[8:16]}"
+                
+                # Generate a suggested name based on product ID
+                suggested_name = enc['product_id'].strip().replace(" ", "-")
+                if not suggested_name:
+                    suggested_name = f"Enclosure-{enc['eid']}"
+                
+                print(f"  - id: \"{logical_id if logical_id else enc['eid']}\"  # Enclosure {enc['eid']}")
+                print(f"    name: \"{suggested_name}\"")
+                print(f"    start_slot: 1")
+                if enc['sas_address']:
+                    print(f"    # SAS Address: {enc['sas_address']}")
+                print()
+            
+        except Exception as e:
+            self.logger.error(f"Error showing enclosure information: {e}")
+            if self.verbose:
+                import traceback
+                traceback.print_exc()
+
+    def _show_sas_enclosure_info(self, enclosure_id: str = None) -> None:
+        """Show sas2ircu/sas3ircu enclosure information and generate config snippet"""
+        try:
+            # Get list of controller IDs
+            list_output = self._execute_command([self.controller, "list"])
+            controller_ids = []
+            for line in list_output.split('\n'):
+                line = line.strip()
+                if line and line.isdigit():
+                    controller_ids.append(line)
+            
+            if not controller_ids:
+                self.logger.error("No controllers found")
+                return
+            
+            enclosures_found = []
+            
+            for ctrl_id in controller_ids:
+                display_output = self._execute_command([self.controller, ctrl_id, "display"])
+                
+                # Parse enclosure information
+                current_enclosure = None
+                for line in display_output.split('\n'):
+                    line = line.strip()
+                    if 'Enclosure#' in line:
+                        # Extract enclosure number
+                        parts = line.split(':')
+                        if len(parts) > 1:
+                            current_enclosure = parts[1].strip().rstrip(':')
+                    elif 'Logical ID' in line and current_enclosure:
+                        # Extract logical ID
+                        parts = line.split(':')
+                        if len(parts) > 1:
+                            logical_id = ':'.join(parts[1:]).strip()
+                            
+                            if enclosure_id and enclosure_id != "all" and current_enclosure != enclosure_id:
+                                current_enclosure = None
+                                continue
+                            
+                            # Get number of slots
+                            num_slots = "0"
+                            for slot_line in display_output.split('\n'):
+                                if 'Numslots' in slot_line and current_enclosure in slot_line:
+                                    slot_parts = slot_line.split(':')
+                                    if len(slot_parts) > 1:
+                                        num_slots = slot_parts[1].strip()
+                            
+                            enclosures_found.append({
+                                "controller": ctrl_id,
+                                "eid": current_enclosure,
+                                "logical_id": logical_id,
+                                "slots": num_slots,
+                                "state": "OK"
+                            })
+                            current_enclosure = None
+            
+            if not enclosures_found:
+                if enclosure_id and enclosure_id != "all":
+                    print(f"No enclosure found with ID: {enclosure_id}")
+                else:
+                    print("No enclosures found")
+                return
+            
+            # Display enclosure information
+            print("\n" + "="*80)
+            print("Enclosure Information")
+            print("="*80)
+            
+            for enc in enclosures_found:
+                print(f"\nController: {enc['controller']}")
+                print(f"Enclosure ID: {enc['eid']}")
+                print(f"Logical ID: {enc['logical_id']}")
+                print(f"Slots: {enc['slots']}")
+                print(f"State: {enc['state']}")
+            
+            # Generate config snippet
+            print("\n" + "="*80)
+            print("Config Snippet for storage_topology.conf")
+            print("="*80)
+            print("\n# Add the following to the 'enclosures:' section:\n")
+            
+            for enc in enclosures_found:
+                suggested_name = f"Enclosure-{enc['eid']}"
+                print(f"  - id: \"{enc['logical_id']}\"  # Enclosure {enc['eid']}")
+                print(f"    name: \"{suggested_name}\"")
+                print(f"    start_slot: 1")
+                print()
+            
+        except Exception as e:
+            self.logger.error(f"Error showing enclosure information: {e}")
+            if self.verbose:
+                import traceback
+                traceback.print_exc()
 
     def detect_sas_enclosure_types(self, controller: str) -> Dict[str, Any]:
         """Detect enclosure types for sas2ircu/sas3ircu controllers"""
@@ -2305,6 +2578,11 @@ class StorageTopology:
         # Handle TrueNAS query if specified
         if self.query_disk:
             self.query_truenas_disk(self.query_disk)
+            return
+        
+        # Handle enclosure info if specified
+        if self.enclosure_id is not None:
+            self.show_enclosure_info(self.enclosure_id)
             return
             
         # Handle disk locate if specified
