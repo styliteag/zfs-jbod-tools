@@ -287,11 +287,95 @@ class StorageTopology:
                 
                 self.logger.debug(f"Controller {controller_idx} response data keys: {list(response_data.keys())}")
                 
-                # Get the physical device information section
+                # Check which format we have: storcli (Physical Device Information) or storcli2 (PD LIST)
+                pd_list = response_data.get("PD LIST", [])
                 physical_devices = response_data.get("Physical Device Information", {})
                 
-                if physical_devices:
-                    self.logger.debug(f"Physical Device Information keys: {list(physical_devices.keys())}")
+                if pd_list:
+                    # storcli2 format: PD LIST is an array
+                    self.logger.debug(f"Detected storcli2 format with {len(pd_list)} drives in PD LIST")
+                    
+                    # Get controller number from Command Status
+                    controller_num = ""
+                    command_status = controller.get("Command Status", {})
+                    if isinstance(command_status.get("Controller"), (int, str)):
+                        controller_num = str(command_status.get("Controller", ""))
+                    
+                    # For storcli2, we need to get detailed information for each drive
+                    # Try to get detailed info for each PID
+                    for pd_entry in pd_list:
+                        pid = pd_entry.get("PID", "")
+                        eid_slt = pd_entry.get("EID:Slt", "")
+                        
+                        if not eid_slt:
+                            continue
+                        
+                        # Parse EID:Slt (e.g., "160:1" -> enclosure="160", slot="1")
+                        if ":" in eid_slt:
+                            enclosure, slot = eid_slt.split(":", 1)
+                        else:
+                            enclosure = ""
+                            slot = ""
+                        
+                        model = pd_entry.get("Model", "").strip()
+                        
+                        # Try to get detailed information for this drive
+                        serial = ""
+                        manufacturer = ""
+                        wwn = ""
+                        
+                        # For storcli2, we need to query detailed info per drive
+                        # Try to get it from a detailed query if available
+                        try:
+                            if pid and enclosure and slot:
+                                detail_output = self._execute_command(
+                                    [self.storcli_cmd, f"/c{controller_num}/e{enclosure}/s{slot}", "show", "all", "J"],
+                                    handle_errors=False
+                                )
+                                try:
+                                    detail_json = self._parse_json_output(detail_output, "")
+                                    if detail_json:
+                                        # Parse detailed info (structure may vary)
+                                        for detail_controller in detail_json.get("Controllers", []):
+                                            detail_response = detail_controller.get("Response Data", {})
+                                            # Look for device attributes
+                                            for key, value in detail_response.items():
+                                                if "Device attributes" in key or "Device attributes" == key:
+                                                    if isinstance(value, dict):
+                                                        serial = value.get("SN", "").strip()
+                                                        manufacturer = value.get("Manufacturer Id", "").strip()
+                                                        wwn = value.get("WWN", "").strip()
+                                                        if not model and value.get("Model Number"):
+                                                            model = value.get("Model Number", "").strip()
+                                                    break
+                                except Exception:
+                                    # If parsing fails, continue without detailed info
+                                    pass
+                        except Exception as e:
+                            self.logger.debug(f"Could not get detailed info for PID {pid}: {e}")
+                        
+                        # Create drive path name similar to storcli format
+                        drive_key = f"/c{controller_num}/e{enclosure}/s{slot}"
+                        
+                        # Only add disks with at least enclosure and slot info
+                        if enclosure and slot:
+                            disk_entry = {
+                                "name": drive_key,
+                                "slot": f"{enclosure}:{slot}",
+                                "controller": controller_num,
+                                "enclosure": enclosure,
+                                "drive": slot,
+                                "sn": serial,
+                                "model": model,
+                                "manufacturer": manufacturer,
+                                "wwn": wwn
+                            }
+                            disks_list.append(disk_entry)
+                            self.logger.debug(f"Found {self.storcli_cmd} disk: {disk_entry}")
+                
+                elif physical_devices:
+                    # storcli format: Physical Device Information
+                    self.logger.debug(f"Detected storcli format with Physical Device Information")
                     
                     # Find all drive keys (keys that start with "Drive /c" and don't contain "Detailed Information")
                     drive_keys = [k for k in physical_devices.keys() 
@@ -323,7 +407,7 @@ class StorageTopology:
                         # Get basic drive info from the drive key entry
                         try:
                             basic_drive_info = physical_devices[drive_key][0]
-                            model = basic_drive_info.get("Model", "")
+                            model = basic_drive_info.get("Model", "").strip()
                         except (IndexError, KeyError):
                             self.logger.debug(f"Could not extract basic info for drive {drive_key}")
                             model = ""
@@ -342,12 +426,12 @@ class StorageTopology:
                         device_attributes_key = f"{drive_key} Device attributes"
                         if device_attributes_key in detailed_info:
                             device_attributes = detailed_info[device_attributes_key]
-                            serial = device_attributes.get("SN", "")
-                            manufacturer = device_attributes.get("Manufacturer Id", "")
-                            wwn = device_attributes.get("WWN", "")
+                            serial = device_attributes.get("SN", "").strip()
+                            manufacturer = device_attributes.get("Manufacturer Id", "").strip()
+                            wwn = device_attributes.get("WWN", "").strip()
                             # If model wasn't found in basic info, try to get it from detailed info
-                            if not model:
-                                model = device_attributes.get("Model Number", "")
+                            if not model and device_attributes.get("Model Number"):
+                                model = device_attributes.get("Model Number", "").strip()
                         
                         self.logger.debug(f"Drive {drive_key} details - SN: {serial}, Model: {model}, WWN: {wwn}")
                         
@@ -708,31 +792,53 @@ class StorageTopology:
             for controller_data in enclosure_info.get("Controllers", []):
                 response_data = controller_data.get("Response Data", {})
                 
-                # Find enclosure keys
-                enclosure_keys = [k for k in response_data.keys() if k.startswith("Enclosure")]
-                
-                for enclosure_key in enclosure_keys:
-                    # Extract controller and enclosure numbers
-                    controller_match = re.search(r"/c(\d+)/e(\d+)", enclosure_key)
-                    if controller_match:
-                        controller_num = controller_match.group(1)
-                        enclosure_num = controller_match.group(2)
+                # Check for storcli2 format: "Enclosure List" array
+                enclosure_list = response_data.get("Enclosure List", [])
+                if enclosure_list:
+                    # storcli2 format
+                    command_status = controller_data.get("Command Status", {})
+                    controller_num = ""
+                    if isinstance(command_status.get("Controller"), (int, str)):
+                        controller_num = str(command_status.get("Controller", ""))
+                    
+                    for enclosure_entry in enclosure_list:
+                        enclosure_num = str(enclosure_entry.get("EID", ""))
+                        product_id = enclosure_entry.get("ProdID", "").strip()
+                        num_slots = str(enclosure_entry.get("Slots", "0"))
                         
-                        # Get product identification
-                        enclosure_data = response_data.get(enclosure_key, {})
-                        inquiry_data = enclosure_data.get("Inquiry Data", {})
-                        product_id = inquiry_data.get("Product Identification", "").rstrip()
-                        
-                        # Get number of slots
-                        properties = enclosure_data.get("Properties", [{}])[0] if enclosure_data.get("Properties") else {}
-                        num_slots = properties.get("Slots", "0")
-                        
-                        enclosure_map["Controllers"].append({
-                            "controller": controller_num,
-                            "enclosure": enclosure_num,
-                            "type": product_id,
-                            "slots": num_slots
-                        })
+                        if enclosure_num:
+                            enclosure_map["Controllers"].append({
+                                "controller": controller_num,
+                                "enclosure": enclosure_num,
+                                "type": product_id,
+                                "slots": num_slots
+                            })
+                else:
+                    # storcli format: "Enclosure" keys
+                    enclosure_keys = [k for k in response_data.keys() if k.startswith("Enclosure")]
+                    
+                    for enclosure_key in enclosure_keys:
+                        # Extract controller and enclosure numbers
+                        controller_match = re.search(r"/c(\d+)/e(\d+)", enclosure_key)
+                        if controller_match:
+                            controller_num = controller_match.group(1)
+                            enclosure_num = controller_match.group(2)
+                            
+                            # Get product identification
+                            enclosure_data = response_data.get(enclosure_key, {})
+                            inquiry_data = enclosure_data.get("Inquiry Data", {})
+                            product_id = inquiry_data.get("Product Identification", "").rstrip()
+                            
+                            # Get number of slots
+                            properties = enclosure_data.get("Properties", [{}])[0] if enclosure_data.get("Properties") else {}
+                            num_slots = properties.get("Slots", "0")
+                            
+                            enclosure_map["Controllers"].append({
+                                "controller": controller_num,
+                                "enclosure": enclosure_num,
+                                "type": product_id,
+                                "slots": num_slots
+                            })
         except (subprocess.SubprocessError, json.JSONDecodeError, KeyError) as e:
             self.logger.warning(f"Error getting {self.storcli_cmd} enclosure information: {e}")
         
