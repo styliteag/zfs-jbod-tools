@@ -944,12 +944,33 @@ class StorageTopology:
                 command_status = controller_data.get("Command Status", {})
                 controller_num = str(command_status.get("Controller", ""))
                 
-                # Check for storcli2 format: "Enclosure List" array
-                enclosure_list = response_data.get("Enclosure List", [])
+                # Check for storcli2 format: "Enclosures" array or "Enclosure List" array
+                enclosure_list = response_data.get("Enclosures", [])
+                if not enclosure_list:
+                    enclosure_list = response_data.get("Enclosure List", [])
+                
                 if enclosure_list:
                     # storcli2 format
                     for enclosure_entry in enclosure_list:
-                        eid = str(enclosure_entry.get("EID", ""))
+                        # Handle both formats: direct properties or Properties array
+                        properties = enclosure_entry.get("Properties", [])
+                        if properties and isinstance(properties, list) and len(properties) > 0:
+                            # Format with Properties array
+                            props = properties[0]
+                            eid = str(props.get("EID", ""))
+                            product_id = props.get("ProdID", "").strip()
+                            slots = str(props.get("Slots", "0"))
+                            state = props.get("State", "")
+                        else:
+                            # Direct format (Enclosure List style)
+                            eid = str(enclosure_entry.get("EID", ""))
+                            product_id = enclosure_entry.get("ProdID", "").strip()
+                            slots = str(enclosure_entry.get("Slots", "0"))
+                            state = enclosure_entry.get("State", "")
+                        
+                        if not eid:
+                            continue
+                        
                         if enclosure_id and enclosure_id != "all" and eid != enclosure_id:
                             continue
                         
@@ -975,9 +996,9 @@ class StorageTopology:
                         enclosures_found.append({
                             "controller": controller_num,
                             "eid": eid,
-                            "product_id": enclosure_entry.get("ProdID", "").strip(),
-                            "slots": str(enclosure_entry.get("Slots", "0")),
-                            "state": enclosure_entry.get("State", ""),
+                            "product_id": product_id,
+                            "slots": slots,
+                            "state": state,
                             "sas_address": sas_address.strip() if sas_address else ""
                         })
                 else:
