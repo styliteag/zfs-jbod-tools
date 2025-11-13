@@ -316,8 +316,23 @@ class StorageTopology:
                 print(f"No enclosure found with ID: {self.enclosure_id}")
                 return
 
-        # Display config snippet
+        # Display enclosure information
+        print("\n" + "=" * 80)
+        print("Enclosure Information")
         print("=" * 80)
+
+        for enc in enclosures:
+            print(f"\nController: {enc.controller_id}")
+            print(f"Enclosure ID: {enc.enclosure_id}")
+            if enc.product_id:
+                print(f"Product ID: {enc.product_id}")
+            if enc.logical_id:
+                print(f"Logical ID: {enc.logical_id}")
+            print(f"Slots: {enc.slots}")
+            print(f"State: OK")  # Could be enhanced with actual state if available
+
+        # Display config snippet
+        print("\n" + "=" * 80)
         print("Config Snippet for storage_topology.conf")
         print("=" * 80)
         print("\n# Add to 'enclosures:' section:\n")
