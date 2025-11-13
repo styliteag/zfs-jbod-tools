@@ -1306,17 +1306,33 @@ class StorageTopology:
             Dict[str, Any]: The configuration entry for the enclosure, or None if not found
         """
         # First try to find configuration by product ID (for storcli)
-        if product_id and product_id in self.enclosures:
-            config_entry = self.enclosures[product_id]
-            self.logger.debug(f"Found config for product ID {product_id}: {config_entry}")
-            return config_entry
+        # Strip whitespace for comparison since product IDs often have trailing spaces
+        if product_id:
+            product_id_stripped = product_id.strip()
+            # Try exact match first
+            if product_id in self.enclosures:
+                config_entry = self.enclosures[product_id]
+                self.logger.debug(f"Found config for product ID {product_id}: {config_entry}")
+                return config_entry
+            # Try stripped version
+            elif product_id_stripped in self.enclosures:
+                config_entry = self.enclosures[product_id_stripped]
+                self.logger.debug(f"Found config for product ID (stripped) {product_id_stripped}: {config_entry}")
+                return config_entry
+            # Try matching any config key that matches when stripped
+            for config_id, config_entry in self.enclosures.items():
+                if isinstance(config_id, str) and config_id.strip() == product_id_stripped:
+                    self.logger.debug(f"Found config for product ID (matched) {config_id}: {config_entry}")
+                    return config_entry
+        
         # Then try by logical ID
-        elif logical_id and logical_id in self.enclosures:
+        if logical_id and logical_id in self.enclosures:
             config_entry = self.enclosures[logical_id]
             self.logger.debug(f"Found config for logical ID {logical_id}: {config_entry}")
             return config_entry
+        
         # Finally try by enclosure ID
-        elif enclosure and enclosure in self.enclosures:
+        if enclosure and enclosure in self.enclosures:
             config_entry = self.enclosures[enclosure]
             self.logger.debug(f"Found config for enclosure ID {enclosure}: {config_entry}")
             return config_entry
