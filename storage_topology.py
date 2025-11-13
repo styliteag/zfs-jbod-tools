@@ -715,6 +715,7 @@ class StorageTopology:
         multipath_map, has_multipath = self.detect_multipath_disks()
         
         combined_disk = []
+        seen_wwns = set()  # Track WWNs we've already processed to avoid duplicates
         
         # Process each block device from lsblk
         for block_device in lsblk.get("blockdevices", []):
@@ -743,6 +744,25 @@ class StorageTopology:
             # Look for matching disk in DISKS_TABLE_JSON by serial or WWN
             # Remove the "0x" from the WWN and convert to lowercase
             my_wwn = wwn.replace("0x", "").lower() if wwn else ""
+            
+            # Skip if we've already seen this WWN (multipath duplicate)
+            # Prefer multipath device names (dm-*) over individual paths
+            if my_wwn and my_wwn in seen_wwns:
+                # If this is a multipath device name (dm-*), replace the previous entry
+                if dev_name.startswith("/dev/dm-"):
+                    # Find and remove the previous entry with this WWN
+                    combined_disk = [entry for entry in combined_disk 
+                                    if entry[1].replace("0x", "").lower() != my_wwn]
+                    seen_wwns.discard(my_wwn)  # Allow this entry to be added
+                    self.logger.debug(f"Replacing with multipath device {dev_name} for WWN {my_wwn}")
+                else:
+                    # Skip this duplicate path (keep the first one we saw)
+                    self.logger.debug(f"Skipping duplicate path {dev_name} for WWN {my_wwn}")
+                    continue
+            
+            # Mark this WWN as seen (after checking for duplicates)
+            if my_wwn:
+                seen_wwns.add(my_wwn)
             
             # Default values if no match is found - use "null" consistently
             name = "null"
