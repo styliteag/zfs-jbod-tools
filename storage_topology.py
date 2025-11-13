@@ -745,25 +745,6 @@ class StorageTopology:
             # Remove the "0x" from the WWN and convert to lowercase
             my_wwn = wwn.replace("0x", "").lower() if wwn else ""
             
-            # Skip if we've already seen this WWN (multipath duplicate)
-            # Prefer multipath device names (dm-*) over individual paths
-            if my_wwn and my_wwn in seen_wwns:
-                # If this is a multipath device name (dm-*), replace the previous entry
-                if dev_name.startswith("/dev/dm-"):
-                    # Find and remove the previous entry with this WWN
-                    combined_disk = [entry for entry in combined_disk 
-                                    if entry[1].replace("0x", "").lower() != my_wwn]
-                    seen_wwns.discard(my_wwn)  # Allow this entry to be added
-                    self.logger.debug(f"Replacing with multipath device {dev_name} for WWN {my_wwn}")
-                else:
-                    # Skip this duplicate path (keep the first one we saw)
-                    self.logger.debug(f"Skipping duplicate path {dev_name} for WWN {my_wwn}")
-                    continue
-            
-            # Mark this WWN as seen (after checking for duplicates)
-            if my_wwn:
-                seen_wwns.add(my_wwn)
-            
             # Default values if no match is found - use "null" consistently
             name = "null"
             slot = "null"
@@ -777,6 +758,7 @@ class StorageTopology:
             
             # Find matching disk
             disk_found = False
+            matched_slot = None  # Store slot identifier for deduplication
             if my_wwn:
                 for disk in disks_table_json:
                     # Compare wwn or serial
@@ -817,8 +799,27 @@ class StorageTopology:
                         disk_model = disk.get("model", "null") 
                         manufacturer = disk.get("manufacturer", "null")
                         disk_wwn = disk.get("wwn", "null")
+                        matched_slot = disk.get("slot", "null")  # Store slot for deduplication
                         disk_found = True
                         break
+            
+            # Only deduplicate devices that matched a controller disk
+            # Use slot identifier (e.g., "160:1") for deduplication since it uniquely identifies a physical disk
+            if disk_found and matched_slot and matched_slot != "null":
+                if matched_slot in seen_wwns:
+                    # If this is a multipath device name (dm-*), replace the previous entry
+                    if dev_name.startswith("/dev/dm-"):
+                        # Find and remove the previous entry with this slot
+                        combined_disk = [entry for entry in combined_disk 
+                                        if entry[2] != matched_slot]
+                        seen_wwns.discard(matched_slot)  # Allow this entry to be added
+                        self.logger.debug(f"Replacing with multipath device {dev_name} for slot {matched_slot}")
+                    else:
+                        # Skip this duplicate path (keep the first one we saw)
+                        self.logger.debug(f"Skipping duplicate path {dev_name} for slot {matched_slot}")
+                        continue
+                # Mark this slot as seen (only for matched devices)
+                seen_wwns.add(matched_slot)
             
             # Handle special cases
             if drive == "null":
