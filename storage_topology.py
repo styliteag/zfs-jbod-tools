@@ -1381,24 +1381,33 @@ class StorageTopology:
         """Calculate the physical and logical position of a disk
         
         Args:
-            drive_num (int): The raw drive number from controller
-            hw_start_slot (int): The hardware start slot number
+            drive_num (int): The raw drive number from controller (1-based)
+            hw_start_slot (int): The hardware start slot number (usually 1)
             config_entry (Dict[str, Any]): The enclosure configuration entry
             
         Returns:
             Tuple[int, int]: The physical slot number and logical disk number
         """
         # Get configuration values
-        start_slot = config_entry.get("start_slot", hw_start_slot)
+        start_slot = config_entry.get("start_slot", 1)
+        offset = config_entry.get("offset", 0)
         
-        # Calculate the real drive number by subtracting the hardware start slot
-        real_drive_num = drive_num - hw_start_slot # -1 to account for the fact that the drive number is 0-based
+        # Default hw_start_slot to 1 if not provided or 0
+        if hw_start_slot <= 0:
+            hw_start_slot = 1
+        
+        # Calculate the relative drive number (0-based index from hardware start)
+        # If hw_start_slot is 1 and drive_num is 1, real_drive_num should be 0
+        real_drive_num = drive_num - hw_start_slot
         if real_drive_num < 0:
-            real_drive_num = drive_num  # Fallback if start_slot is incorrect
+            real_drive_num = 0  # Ensure non-negative
         
-        # Calculate physical slot and logical disk numbers
-        physical_slot = real_drive_num + start_slot
-        logical_disk = real_drive_num + start_slot - 1 # -1 to account for the fact that the drive/disk number is 0-based
+        # Calculate physical slot: start_slot + relative position + offset
+        # If start_slot=1, offset=0, and drive 1 (real_drive_num=0), then slot = 1 + 0 + 0 = 1
+        physical_slot = start_slot + real_drive_num + offset
+        
+        # Logical disk number is the same as physical slot (1-based)
+        logical_disk = physical_slot
         
         return physical_slot, logical_disk
 
