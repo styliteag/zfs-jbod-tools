@@ -101,7 +101,7 @@ class StorageTopology:
                           help="Turn off the identify LED for all disks")
         parser.add_argument("--wait", type=int, metavar="SECONDS",
                           help="LED blink duration in seconds (1-60)")
-        parser.add_argument("--enclosure", nargs='?', const='all', metavar="ENCLOSURE_ID",
+        parser.add_argument("-e", "--enclosure", nargs='?', const='all', metavar="ENCLOSURE_ID",
                           help="Show enclosure information and generate config snippet")
 
         args = parser.parse_args()
@@ -301,23 +301,39 @@ class StorageTopology:
 
     def _handle_enclosure_info(self) -> None:
         """Handle enclosure information display"""
-        # This would need controller-specific implementation
-        # For now, detect controller and delegate
+        # Detect controller and get enclosures
         controller = self.detect_controller()
         enclosures = controller.get_enclosures()
 
-        print("\nEnclosure Information:")
+        if not enclosures:
+            print("No enclosures found")
+            return
+
+        # Filter by enclosure_id if specified
+        if self.enclosure_id and self.enclosure_id != 'all':
+            enclosures = [e for e in enclosures if e.enclosure_id == self.enclosure_id]
+            if not enclosures:
+                print(f"No enclosure found with ID: {self.enclosure_id}")
+                return
+
+        # Display config snippet
         print("=" * 80)
+        print("Config Snippet for storage_topology.conf")
+        print("=" * 80)
+        print("\n# Add to 'enclosures:' section:\n")
 
         for enc in enclosures:
-            print(f"\nController: {enc.controller_id}")
-            print(f"Enclosure ID: {enc.enclosure_id}")
-            if enc.logical_id:
-                print(f"Logical ID: {enc.logical_id}")
-            if enc.product_id:
-                print(f"Product ID: {enc.product_id}")
-            print(f"Type: {enc.enclosure_type}")
-            print(f"Slots: {enc.slots}")
+            # Use product_id or logical_id as the config ID, fallback to enclosure_type
+            config_id = enc.product_id or enc.logical_id or enc.enclosure_type or f"Enclosure-{enc.enclosure_id}"
+            config_name = config_id  # Use same as name by default
+
+            # Strip whitespace from config_id
+            config_id = config_id.strip()
+
+            print(f'  - id: "{config_id}"')
+            print(f'    name: "{config_name}"')
+            print(f'    start_slot: 1')
+            print()
 
     def _handle_locate_disk(self, disk_name: str, turn_off: bool) -> None:
         """Handle single disk LED operation"""
