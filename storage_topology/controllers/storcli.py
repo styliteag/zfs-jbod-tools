@@ -17,18 +17,52 @@ class StorcliController(BaseController):
         self.cmd = self._detect_storcli_command()
 
     def _detect_storcli_command(self) -> str:
-        """Detect which storcli command is available (prefer storcli2)
+        """Detect which storcli command is available and has controllers
+
+        Tries storcli2 first, but falls back to storcli if storcli2 finds no controllers.
 
         Returns:
             str: Command name ('storcli2' or 'storcli')
         """
+        # Try storcli2 first
         if self._check_command_exists("storcli2"):
             self.logger.debug("Found storcli2 command")
-            return "storcli2"
-        elif self._check_command_exists("storcli"):
+            if self._has_controllers("storcli2"):
+                self.logger.debug("storcli2 has controllers, using it")
+                return "storcli2"
+            else:
+                self.logger.debug("storcli2 found no controllers, trying storcli")
+
+        # Try storcli
+        if self._check_command_exists("storcli"):
             self.logger.debug("Found storcli command")
-            return "storcli"
+            if self._has_controllers("storcli"):
+                self.logger.debug("storcli has controllers, using it")
+                return "storcli"
+            else:
+                self.logger.debug("storcli found no controllers")
+
         return ""
+
+    def _has_controllers(self, cmd: str) -> bool:
+        """Check if a storcli command finds any controllers
+
+        Args:
+            cmd: Command to check ('storcli' or 'storcli2')
+
+        Returns:
+            bool: True if controllers found, False otherwise
+        """
+        try:
+            output = self._execute_command([cmd, "show", "ctrlcount"], handle_errors=False)
+            controller_count_match = re.search(r"Controller Count = (\d+)", output)
+            if controller_count_match:
+                count = int(controller_count_match.group(1))
+                self.logger.debug(f"{cmd} reports {count} controllers")
+                return count > 0
+        except Exception as e:
+            self.logger.debug(f"Error checking {cmd} controller count: {e}")
+        return False
 
     @property
     def controller_type(self) -> str:
