@@ -301,10 +301,85 @@ class StorageTopology:
                     if isinstance(command_status.get("Controller"), (int, str)):
                         controller_num = str(command_status.get("Controller", ""))
                     
-                    # storcli2 doesn't include serial numbers in /call show all J output
-                    # We need to query individual drives, but we'll do it efficiently by querying per drive
-                    # Store details in a map keyed by EID:Slt
+                    # Try to get all PD details at once using /call/eall/sall or /c0/eall/sall show all J
+                    # This should give us serial numbers and WWNs for all drives in one command
                     pd_details_map = {}
+                    
+                    def parse_pd_details(json_data):
+                        """Helper function to parse PD details from JSON response"""
+                        for eall_controller in json_data.get("Controllers", []):
+                            eall_response = eall_controller.get("Response Data", {})
+                            
+                            # Check for storcli2 "Drives List" format (from /c0/eall/sall show all J)
+                            drives_list = eall_response.get("Drives List", [])
+                            if drives_list:
+                                for drive_entry in drives_list:
+                                    drive_info = drive_entry.get("Drive Information", {})
+                                    eid_slt = drive_info.get("EID:Slt", "")
+                                    if eid_slt:
+                                        # Get detailed information from Drive Detailed Information
+                                        detailed_info = drive_entry.get("Drive Detailed Information", {})
+                                        if detailed_info:
+                                            pd_details_map[eid_slt] = {
+                                                "SN": detailed_info.get("Serial Number", "").strip(),
+                                                "Manufacturer Id": detailed_info.get("Vendor", "").strip(),
+                                                "WWN": detailed_info.get("WWN", "").strip(),
+                                                "Model Number": detailed_info.get("Model", "").strip()
+                                            }
+                                continue
+                            
+                            # Look for Physical Device Information (storcli format)
+                            physical_devices = eall_response.get("Physical Device Information", {})
+                            if physical_devices:
+                                for drive_key, drive_data in physical_devices.items():
+                                    if isinstance(drive_data, list) and len(drive_data) > 0:
+                                        # Extract EID:Slt from drive data or key
+                                        eid_slt = drive_data[0].get("EID:Slt", "")
+                                        if not eid_slt:
+                                            # Try to extract from key (e.g., "Drive /c0/e160/s1")
+                                            import re
+                                            eid_match = re.search(r"/e(\d+)/s(\d+)", drive_key)
+                                            if eid_match:
+                                                eid_slt = f"{eid_match.group(1)}:{eid_match.group(2)}"
+                                        
+                                        # Get detailed information
+                                        detailed_key = f"{drive_key} - Detailed Information"
+                                        detailed_info = physical_devices.get(detailed_key, {})
+                                        device_attrs_key = f"{drive_key} Device attributes"
+                                        if device_attrs_key in detailed_info:
+                                            pd_details_map[eid_slt] = detailed_info[device_attrs_key]
+                            else:
+                                # Check for other structures
+                                for key, value in eall_response.items():
+                                    if isinstance(value, dict):
+                                        eid_slt = value.get("EID:Slt", "")
+                                        if eid_slt:
+                                            pd_details_map[eid_slt] = value
+                    
+                    # Try /call/eall/sall first (works for all controllers)
+                    try:
+                        eall_sall_output = self._execute_command(
+                            [self.storcli_cmd, "/call/eall/sall", "show", "all", "J"],
+                            handle_errors=False
+                        )
+                        eall_sall_json = self._parse_json_output(eall_sall_output, "")
+                        if eall_sall_json:
+                            parse_pd_details(eall_sall_json)
+                    except Exception as e:
+                        self.logger.debug(f"Could not get PD details from /call/eall/sall: {e}")
+                    
+                    # If that didn't work, try /c{controller}/eall/sall
+                    if not pd_details_map:
+                        try:
+                            eall_sall_output = self._execute_command(
+                                [self.storcli_cmd, f"/c{controller_num}/eall/sall", "show", "all", "J"],
+                                handle_errors=False
+                            )
+                            eall_sall_json = self._parse_json_output(eall_sall_output, "")
+                            if eall_sall_json:
+                                parse_pd_details(eall_sall_json)
+                        except Exception as e:
+                            self.logger.debug(f"Could not get PD details from /c{controller_num}/eall/sall: {e}")
                     
                     # Process PD LIST entries
                     for pd_entry in pd_list:
@@ -323,37 +398,12 @@ class StorageTopology:
                         
                         model = pd_entry.get("Model", "").strip()
                         
-                        # Try to get detailed information - query individual drive if not already cached
+                        # Get detailed information from the map
                         serial = ""
                         manufacturer = ""
                         wwn = ""
                         
-                        # Check if we already have details for this drive
                         pd_detail = pd_details_map.get(eid_slt, {})
-                        
-                        if not pd_detail and enclosure and slot:
-                            # Query individual drive for details
-                            try:
-                                detail_output = self._execute_command(
-                                    [self.storcli_cmd, f"/c{controller_num}/e{enclosure}/s{slot}", "show", "all", "J"],
-                                    handle_errors=False
-                                )
-                                detail_json = self._parse_json_output(detail_output, "")
-                                if detail_json:
-                                    # Parse detailed info
-                                    for detail_controller in detail_json.get("Controllers", []):
-                                        detail_response = detail_controller.get("Response Data", {})
-                                        # Look for Device attributes
-                                        for key, value in detail_response.items():
-                                            if "Device attributes" in key or "Device attributes" == key:
-                                                if isinstance(value, dict):
-                                                    pd_details_map[eid_slt] = value
-                                                    pd_detail = value
-                                                    break
-                            except Exception as e:
-                                self.logger.debug(f"Could not get detailed info for {eid_slt}: {e}")
-                        
-                        # Extract serial, manufacturer, WWN from detail structure
                         if pd_detail and isinstance(pd_detail, dict):
                             serial = pd_detail.get("SN", "").strip()
                             manufacturer = pd_detail.get("Manufacturer Id", "").strip()
