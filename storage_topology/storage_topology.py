@@ -379,6 +379,10 @@ class StorageTopology:
         else:
             self._display_table()
 
+        # Show ZFS pool information if requested
+        if self.show_zpool:
+            self._display_zpool_info()
+
     def _display_table(self) -> None:
         """Display disks in table format"""
         headers = ["Device", "Serial", "Model", "Controller", "Enclosure",
@@ -421,3 +425,70 @@ class StorageTopology:
             print("  ".join(row_parts))
 
         print("-" * len(header_line))
+
+    def _display_zpool_info(self) -> None:
+        """Display ZFS pool information with disk locations"""
+        import subprocess
+        import re
+
+        self.logger.info("Displaying ZFS pool information")
+
+        # Create disk lookup dictionary
+        disk_info = {disk.dev_name: disk for disk in self.disks}
+
+        # Get zpool status
+        try:
+            zpool_output = subprocess.check_output(["zpool", "status", "-LP"], universal_newlines=True)
+
+            print("\n" + "="*80)
+            print("ZFS Pool Status with Disk Locations")
+            print("="*80 + "\n")
+
+            # Process each line
+            for line in zpool_output.splitlines():
+                # If the line contains "/dev/" then it's a disk
+                if "/dev/" in line:
+                    # Extract the device name and status from the line
+                    indentation = re.match(r"^(\s*)", line).group(1)
+                    parts = line.strip().split()
+                    if not parts:
+                        print(line)
+                        continue
+
+                    dev = parts[0]
+                    status = parts[1] if len(parts) > 1 else ""
+
+                    # If the last character is a digit, then it's a partition
+                    # and we need to find the disk name
+                    if re.search(r"(p|)[0-9]+$", dev):
+                        dev = self._get_disk_from_partition(dev)
+
+                    # Find the device in our disk info
+                    disk = disk_info.get(dev)
+                    if disk:
+                        print(f"{indentation}{parts[0]} {status} {disk.location} (S/N: {disk.serial})")
+                    else:
+                        print(line)
+                else:
+                    print(line)
+
+        except subprocess.SubprocessError as e:
+            self.logger.error(f"Error getting ZFS pool information: {e}")
+
+    def _get_disk_from_partition(self, dev: str) -> str:
+        """Get disk name from partition name
+
+        Args:
+            dev: Device path (e.g., /dev/sda1, /dev/nvme0n1p1)
+
+        Returns:
+            Base disk device path
+        """
+        import re
+
+        # Handle NVMe partitions (nvme0n1p1 -> nvme0n1)
+        if re.search(r"nvme.*p[0-9]+$", dev):
+            return re.sub(r"p[0-9]+$", "", dev)
+        # Handle traditional partitions (sda1 -> sda)
+        else:
+            return re.sub(r"[0-9]+$", "", dev)
