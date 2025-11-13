@@ -66,7 +66,6 @@ class StorageTopology:
         sort_by (str): Field to sort query results by
         pool_disks_only (bool): Flag to show only disks that are part of ZFS pools
         pool_name (str): Name of the ZFS pool to filter by
-        enclosure_id (str): Enclosure ID to show information for
         logger (Logger): Application logger
     """
 
@@ -934,7 +933,7 @@ class StorageTopology:
             enclosure_info = self._parse_json_output(enclosure_info_output, "Error parsing storcli enclosure information")
             
             if not enclosure_info:
-                self.logger.error("Could not get enclosure information")
+                print("No enclosures found")
                 return
             
             enclosures_found = []
@@ -1092,7 +1091,7 @@ class StorageTopology:
                     controller_ids.append(line)
             
             if not controller_ids:
-                self.logger.error("No controllers found")
+                print("No controllers found")
                 return
             
             enclosures_found = []
