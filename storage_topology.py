@@ -873,20 +873,32 @@ class StorageTopology:
             # Process each controller
             for controller_data in enclosure_info.get("Controllers", []):
                 response_data = controller_data.get("Response Data", {})
+                command_status = controller_data.get("Command Status", {})
+                controller_num = ""
+                if isinstance(command_status.get("Controller"), (int, str)):
+                    controller_num = str(command_status.get("Controller", ""))
                 
-                # Check for storcli2 format: "Enclosure List" array
-                enclosure_list = response_data.get("Enclosure List", [])
+                # Check for storcli2 format: "Enclosures" array or "Enclosure List" array
+                enclosure_list = response_data.get("Enclosures", [])
+                if not enclosure_list:
+                    enclosure_list = response_data.get("Enclosure List", [])
+                
                 if enclosure_list:
                     # storcli2 format
-                    command_status = controller_data.get("Command Status", {})
-                    controller_num = ""
-                    if isinstance(command_status.get("Controller"), (int, str)):
-                        controller_num = str(command_status.get("Controller", ""))
-                    
                     for enclosure_entry in enclosure_list:
-                        enclosure_num = str(enclosure_entry.get("EID", ""))
-                        product_id = enclosure_entry.get("ProdID", "").strip()
-                        num_slots = str(enclosure_entry.get("Slots", "0"))
+                        # Handle both formats: direct properties or Properties array
+                        properties = enclosure_entry.get("Properties", [])
+                        if properties and isinstance(properties, list) and len(properties) > 0:
+                            # Format with Properties array
+                            props = properties[0]
+                            enclosure_num = str(props.get("EID", ""))
+                            product_id = props.get("ProdID", "").strip()
+                            num_slots = str(props.get("Slots", "0"))
+                        else:
+                            # Direct format (Enclosure List style)
+                            enclosure_num = str(enclosure_entry.get("EID", ""))
+                            product_id = enclosure_entry.get("ProdID", "").strip()
+                            num_slots = str(enclosure_entry.get("Slots", "0"))
                         
                         if enclosure_num:
                             enclosure_map["Controllers"].append({
@@ -1330,21 +1342,24 @@ class StorageTopology:
         # Strip whitespace for comparison since product IDs often have trailing spaces
         if product_id:
             product_id_stripped = product_id.strip()
+            self.logger.debug(f"Looking for config with product_id='{product_id}' (stripped='{product_id_stripped}'), available keys: {list(self.enclosures.keys())}")
             # Try exact match first
             if product_id in self.enclosures:
                 config_entry = self.enclosures[product_id]
-                self.logger.debug(f"Found config for product ID {product_id}: {config_entry}")
+                self.logger.debug(f"Found config for product ID (exact) {product_id}: {config_entry}")
                 return config_entry
             # Try stripped version
-            elif product_id_stripped in self.enclosures:
+            if product_id_stripped in self.enclosures:
                 config_entry = self.enclosures[product_id_stripped]
                 self.logger.debug(f"Found config for product ID (stripped) {product_id_stripped}: {config_entry}")
                 return config_entry
             # Try matching any config key that matches when stripped
             for config_id, config_entry in self.enclosures.items():
-                if isinstance(config_id, str) and config_id.strip() == product_id_stripped:
-                    self.logger.debug(f"Found config for product ID (matched) {config_id}: {config_entry}")
-                    return config_entry
+                if isinstance(config_id, str):
+                    config_id_stripped = config_id.strip()
+                    if config_id_stripped == product_id_stripped:
+                        self.logger.debug(f"Found config for product ID (matched stripped) '{config_id}' (stripped='{config_id_stripped}') == '{product_id_stripped}': {config_entry}")
+                        return config_entry
         
         # Then try by logical ID
         if logical_id and logical_id in self.enclosures:
