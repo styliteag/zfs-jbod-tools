@@ -1,0 +1,4 @@
+# Dependencies for Storage Topology Tool
+
+# YAML configuration file support
+PyYAML>=6.0
