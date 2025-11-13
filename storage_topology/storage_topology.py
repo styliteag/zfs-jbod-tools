@@ -4,7 +4,7 @@ import argparse
 import json
 import logging
 import sys
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 from .controllers import BaseController, StorcliController, SasIrcuController
 from .models import Disk
