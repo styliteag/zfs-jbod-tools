@@ -3,7 +3,7 @@
 Storage Topology Tool
 
 This script identifies physical disk locations by matching controller information with system devices.
-It supports LSI MegaRAID controllers via storcli and LSI SAS controllers via sas2ircu/sas3ircu.
+It supports LSI MegaRAID controllers via storcli/storcli2 and LSI SAS controllers via sas2ircu/sas3ircu.
 
 """
 
@@ -27,7 +27,7 @@ class StorageTopology:
     by correlating storage controller information with system block devices.
     
     The tool supports multiple storage controllers:
-    - LSI MegaRAID controllers via storcli
+    - LSI MegaRAID controllers via storcli/storcli2 (storcli2 preferred if available)
     - LSI SAS controllers via sas2ircu (SAS2 controllers)
     - LSI SAS controllers via sas3ircu (SAS3 controllers, not tested right now)
     
@@ -53,6 +53,7 @@ class StorageTopology:
         verbose (bool): Flag for verbose logging
         quiet (bool): Flag to suppress INFO messages
         controller (str): Detected controller type (storcli, sas2ircu, sas3ircu)
+        storcli_cmd (str): Actual command name used (storcli or storcli2)
         disks_table_json (List[Dict]): Disk information from controller
         lsblk_json (Dict): System block device information
         combined_disk (List[List]): Combined disk information
@@ -75,6 +76,7 @@ class StorageTopology:
         self.verbose = False
         self.quiet = False
         self.controller = ""
+        self.storcli_cmd = "storcli"  # Actual command name (storcli or storcli2)
         self.disks_table_json = {}
         self.lsblk_json = {}
         self.combined_disk = []
@@ -194,15 +196,15 @@ class StorageTopology:
         """Check if a controller is found and accessible
         
         Args:
-            controller (str): Controller type to check (storcli, sas2ircu, sas3ircu)
+            controller (str): Controller type to check (storcli, storcli2, sas2ircu, sas3ircu)
             
         Returns:
             bool: True if controller is found and accessible, False otherwise
         """
         try:
-            if controller == "storcli":
-                # Check controller count using storcli
-                output = self._execute_command(["storcli", "show", "ctrlcount"], handle_errors=False)
+            if controller in ["storcli", "storcli2"]:
+                # Check controller count using storcli/storcli2
+                output = self._execute_command([controller, "show", "ctrlcount"], handle_errors=False)
                 controller_count_match = re.search(r"Controller Count = (\d+)", output)
                 if controller_count_match and int(controller_count_match.group(1)) > 0:
                     return True
@@ -218,19 +220,29 @@ class StorageTopology:
     def detect_controllers(self) -> str:
         """Detect available controllers and select one to use"""
         storcli_found = self.check_command_exists("storcli")
+        storcli2_found = self.check_command_exists("storcli2")
         sas2ircu_found = self.check_command_exists("sas2ircu")
         sas3ircu_found = self.check_command_exists("sas3ircu")
         
-        if not any([storcli_found, sas2ircu_found, sas3ircu_found]):
-            self.logger.error("storcli, sas2ircu, and sas3ircu could not be found. Please install one of them first.")
+        if not any([storcli_found, storcli2_found, sas2ircu_found, sas3ircu_found]):
+            self.logger.error("storcli, storcli2, sas2ircu, and sas3ircu could not be found. Please install one of them first.")
             sys.exit(1)
         
         storcli_found_controller = False
+        storcli2_found_controller = False
         sas2ircu_found_controller = False
         sas3ircu_found_controller = False
         
-        if storcli_found:
+        # Prefer storcli2 over storcli if both are available
+        if storcli2_found:
+            storcli2_found_controller = self.check_controller_found("storcli2")
+            if storcli2_found_controller:
+                self.storcli_cmd = "storcli2"
+        
+        if storcli_found and not storcli2_found_controller:
             storcli_found_controller = self.check_controller_found("storcli")
+            if storcli_found_controller:
+                self.storcli_cmd = "storcli"
         
         if sas2ircu_found:
             sas2ircu_found_controller = self.check_controller_found("sas2ircu")
@@ -238,12 +250,12 @@ class StorageTopology:
         if sas3ircu_found:
             sas3ircu_found_controller = self.check_controller_found("sas3ircu")
         
-        if not any([storcli_found_controller, sas2ircu_found_controller, sas3ircu_found_controller]):
-            self.logger.error("No controller found. Please check your storcli, sas2ircu, or sas3ircu installation.")
+        if not any([storcli_found_controller, storcli2_found_controller, sas2ircu_found_controller, sas3ircu_found_controller]):
+            self.logger.error("No controller found. Please check your storcli, storcli2, sas2ircu, or sas3ircu installation.")
             sys.exit(1)
         
-        # Select the controller to use
-        if storcli_found_controller:
+        # Select the controller to use (normalize storcli2 to storcli for logic)
+        if storcli2_found_controller or storcli_found_controller:
             return "storcli"
         elif sas2ircu_found_controller:
             return "sas2ircu"
@@ -253,18 +265,18 @@ class StorageTopology:
         return ""
 
     def get_storcli_disks(self) -> List[Dict[str, Any]]:
-        """Get disk information using storcli"""
-        self.logger.info("Getting storcli disk information")
+        """Get disk information using storcli/storcli2"""
+        self.logger.info(f"Getting {self.storcli_cmd} disk information")
         
         try:
-            # Run storcli command to get all disk information in JSON format
-            storcli_output = self._execute_command(["storcli", "/call", "show", "all", "J"])
+            # Run storcli/storcli2 command to get all disk information in JSON format
+            storcli_output = self._execute_command([self.storcli_cmd, "/call", "show", "all", "J"])
             
             storcli_json = self._parse_json_output(storcli_output, "Failed to parse storcli JSON output")
             if not storcli_json:
                 return []
             
-            self.logger.debug(f"Got storcli output, controllers: {len(storcli_json.get('Controllers', []))}")
+            self.logger.debug(f"Got {self.storcli_cmd} output, controllers: {len(storcli_json.get('Controllers', []))}")
             
             disks_list = []
             
@@ -353,12 +365,12 @@ class StorageTopology:
                                 "wwn": wwn                           # World Wide Name
                             }
                             disks_list.append(disk_entry)
-                            self.logger.debug(f"Found storcli disk: {disk_entry}")
+                            self.logger.debug(f"Found {self.storcli_cmd} disk: {disk_entry}")
             
-            self.logger.debug(f"Total storcli disks found: {len(disks_list)}")
+            self.logger.debug(f"Total {self.storcli_cmd} disks found: {len(disks_list)}")
             return disks_list
         except Exception as e:
-            self.logger.error(f"Error getting storcli disk information: {e}")
+            self.logger.error(f"Error getting {self.storcli_cmd} disk information: {e}")
             if self.verbose:
                 import traceback
                 traceback.print_exc()
@@ -681,12 +693,12 @@ class StorageTopology:
         return enclosure_map
 
     def detect_storcli_enclosure_types(self) -> Dict[str, Any]:
-        """Detect enclosure types for storcli controllers"""
+        """Detect enclosure types for storcli/storcli2 controllers"""
         enclosure_map = {"Controllers": []}
         
         try:
             # Get enclosure information
-            enclosure_info_output = self._execute_command(["storcli", "/call/eall", "show", "all", "J"])
+            enclosure_info_output = self._execute_command([self.storcli_cmd, "/call/eall", "show", "all", "J"])
             
             enclosure_info = self._parse_json_output(enclosure_info_output, "Error parsing storcli enclosure information")
             if not enclosure_info:
@@ -722,7 +734,7 @@ class StorageTopology:
                             "slots": num_slots
                         })
         except (subprocess.SubprocessError, json.JSONDecodeError, KeyError) as e:
-            self.logger.warning(f"Error getting storcli enclosure information: {e}")
+            self.logger.warning(f"Error getting {self.storcli_cmd} enclosure information: {e}")
         
         return enclosure_map
 
@@ -1121,6 +1133,8 @@ class StorageTopology:
             required_cmds.extend(["lsblk", "smartctl"])
             
             # Controller-specific tools will be checked when detecting controllers
+            if self.check_command_exists("storcli2"):
+                self.logger.debug("Found storcli2 command")
             if self.check_command_exists("storcli"):
                 self.logger.debug("Found storcli command")
             if self.check_command_exists("sas2ircu"):
@@ -1641,12 +1655,12 @@ class StorageTopology:
             
             self.logger.info(f"Found disk {disk_name} in controller {controller}, enclosure {enclosure}, slot {slot}")
             
-            # Use storcli to turn on/off the locate LED
+            # Use storcli/storcli2 to turn on/off the locate LED
             try:
                 locate_action = "stop" if turn_off else "start"
                 
                 # Build the command
-                cmd = ["storcli", f"/c{controller}/e{enclosure}/s{slot}", f"{locate_action}", "locate"]
+                cmd = [self.storcli_cmd, f"/c{controller}/e{enclosure}/s{slot}", f"{locate_action}", "locate"]
                 self._execute_command(cmd, handle_errors=False)
                 
                 if turn_off:
@@ -1654,22 +1668,22 @@ class StorageTopology:
                 else:
                     print(f"Successfully turned on locate LED for disk {disk_name}")
                     if wait_seconds is not None:
-                        # Storcli doesn't support built-in wait time, so implement wait and auto-turn-off
+                        # Storcli/storcli2 doesn't support built-in wait time, so implement wait and auto-turn-off
                         print(f"LED will be turned off automatically after {wait_seconds} seconds")
                         # Wait for the specified time
                         time.sleep(wait_seconds)
                         # Turn off the LED
-                        off_cmd = ["storcli", f"/c{controller}/e{enclosure}/s{slot}", "stop", "locate"]
+                        off_cmd = [self.storcli_cmd, f"/c{controller}/e{enclosure}/s{slot}", "stop", "locate"]
                         self._execute_command(off_cmd, handle_errors=False)
                         print(f"LED for disk {disk_name} has been automatically turned off")
                     else:
                         print("Use the same command with --locate-off to turn off the LED")
                         print(f"Command: python3 storage_topology.py --locate-off {disk_name}")
             except subprocess.CalledProcessError as e:
-                self.logger.error(f"Error executing storcli command: {e}")
+                self.logger.error(f"Error executing {self.storcli_cmd} command: {e}")
                 sys.exit(1)
         else:
-            self.logger.error(f"Could not find disk {disk_name} with serial {serial} in storcli output")
+            self.logger.error(f"Could not find disk {disk_name} with serial {serial} in {self.storcli_cmd} output")
             sys.exit(1)
             
     def _locate_disk_sas(self, disk_name: str, serial: str, turn_off: bool, wait_seconds: int) -> None:
@@ -1751,13 +1765,13 @@ class StorageTopology:
             self._locate_all_disks_off_sas()
             
     def _locate_all_disks_off_storcli(self) -> None:
-        """Turn off all disk LEDs for storcli controller"""
-        # For storcli, we need to get all drives from get_storcli_disks()
+        """Turn off all disk LEDs for storcli/storcli2 controller"""
+        # For storcli/storcli2, we need to get all drives from get_storcli_disks()
         try:
             disks = self.get_storcli_disks()
             
             if not disks:
-                self.logger.error("No disks found in storcli output")
+                self.logger.error(f"No disks found in {self.storcli_cmd} output")
                 sys.exit(1)
             
             # Turn off LED for each disk
@@ -1770,7 +1784,7 @@ class StorageTopology:
                     enclosure = disk["enclosure"]
                     slot = disk["drive"]
                     
-                    cmd = ["storcli", f"/c{controller}/e{enclosure}/s{slot}", "stop", "locate"]
+                    cmd = [self.storcli_cmd, f"/c{controller}/e{enclosure}/s{slot}", "stop", "locate"]
                     self._execute_command(cmd)
                     success_count += 1
                 except subprocess.CalledProcessError as e:
@@ -1782,7 +1796,7 @@ class StorageTopology:
                 print(f"Failed to turn off {failed_count} disk LEDs")
             
         except subprocess.CalledProcessError as e:
-            self.logger.error(f"Error executing storcli command: {e}")
+            self.logger.error(f"Error executing {self.storcli_cmd} command: {e}")
             sys.exit(1)
             
     def _locate_all_disks_off_sas(self) -> None:
@@ -1862,13 +1876,13 @@ class StorageTopology:
             self._locate_all_disks_sas(wait_time)
 
     def _locate_all_disks_storcli(self, wait_time: int) -> None:
-        """Turn on all disk LEDs for storcli controller and turn off after specified time"""
-        # For storcli, we need to get all drives from get_storcli_disks()
+        """Turn on all disk LEDs for storcli/storcli2 controller and turn off after specified time"""
+        # For storcli/storcli2, we need to get all drives from get_storcli_disks()
         try:
             disks = self.get_storcli_disks()
             
             if not disks:
-                self.logger.error("No disks found in storcli output")
+                self.logger.error(f"No disks found in {self.storcli_cmd} output")
                 sys.exit(1)
             
             # Turn on LED for each disk
@@ -1885,7 +1899,7 @@ class StorageTopology:
                     slot = disk["drive"]
                     
                     # Command to turn on the LED
-                    cmd = ["storcli", f"/c{controller}/e{enclosure}/s{slot}", "start", "locate"]
+                    cmd = [self.storcli_cmd, f"/c{controller}/e{enclosure}/s{slot}", "start", "locate"]
                     self._execute_command(cmd)
                     
                     # Add disk to successful list for later turning off
@@ -1920,7 +1934,7 @@ class StorageTopology:
                     slot = disk["slot"]
                     
                     # Command to turn off the LED
-                    cmd = ["storcli", f"/c{controller}/e{enclosure}/s{slot}", "stop", "locate"]
+                    cmd = [self.storcli_cmd, f"/c{controller}/e{enclosure}/s{slot}", "stop", "locate"]
                     self._execute_command(cmd)
                     off_success_count += 1
                 except subprocess.CalledProcessError as e:
@@ -1932,7 +1946,7 @@ class StorageTopology:
                 print(f"Failed to turn off {off_failed_count} disk LEDs")
             
         except subprocess.CalledProcessError as e:
-            self.logger.error(f"Error executing storcli command: {e}")
+            self.logger.error(f"Error executing {self.storcli_cmd} command: {e}")
             sys.exit(1)
 
     def _locate_all_disks_sas(self, wait_time: int) -> None:
