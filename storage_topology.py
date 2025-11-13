@@ -270,12 +270,26 @@ class StorageTopology:
 
     def _display_table(self, disks: List[DiskInfo]) -> None:
         """Display disks in table format"""
-        headers = ["Device", "Name", "Slot", "Ctrl", "Enc", "Drive", 
-                  "Serial", "Model", "Manufacturer", "WWN", 
-                  "Enclosure", "PhysSlot", "LogDisk", "Location"]
-        
-        # Convert disks to list format for backward compatibility
-        rows = [disk.to_list() for disk in disks]
+        # Compact format by default - only show essential columns
+        if self.verbose:
+            # Verbose: show all columns
+            headers = ["Device", "Name", "Slot", "Ctrl", "Enc", "Drive", 
+                      "Serial", "Model", "Manufacturer", "WWN", 
+                      "Enclosure", "PhysSlot", "LogDisk", "Location"]
+            rows = [disk.to_list() for disk in disks]
+        else:
+            # Compact: only show the most useful columns
+            headers = ["Device", "Serial", "Model", "Enclosure", "Slot", "Location"]
+            rows = []
+            for disk in disks:
+                rows.append([
+                    disk.dev_name,
+                    disk.serial,
+                    disk.model,
+                    disk.enclosure_name,
+                    str(disk.physical_slot),
+                    disk.location
+                ])
         
         # Calculate column widths
         widths = [len(h) for h in headers]
