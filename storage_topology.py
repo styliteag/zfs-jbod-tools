@@ -301,25 +301,10 @@ class StorageTopology:
                     if isinstance(command_status.get("Controller"), (int, str)):
                         controller_num = str(command_status.get("Controller", ""))
                     
-                    # Try to get detailed PD information from /call/pdall if available
+                    # storcli2 doesn't include serial numbers in /call show all J output
+                    # We need to query individual drives, but we'll do it efficiently by querying per drive
+                    # Store details in a map keyed by EID:Slt
                     pd_details_map = {}
-                    try:
-                        pdall_output = self._execute_command([self.storcli_cmd, "/call/pdall", "show", "all", "J"], handle_errors=False)
-                        pdall_json = self._parse_json_output(pdall_output, "")
-                        if pdall_json:
-                            # Parse PD details and create a map by PID or EID:Slt
-                            for pdall_controller in pdall_json.get("Controllers", []):
-                                pdall_response = pdall_controller.get("Response Data", {})
-                                # Look for PD details - structure may vary
-                                for key, value in pdall_response.items():
-                                    if isinstance(value, dict):
-                                        # Try to find PID or EID:Slt to map to our PD LIST entries
-                                        pid = value.get("PID", "")
-                                        eid_slt = value.get("EID:Slt", "")
-                                        if pid or eid_slt:
-                                            pd_details_map[pid if pid else eid_slt] = value
-                    except Exception as e:
-                        self.logger.debug(f"Could not get PD details from /call/pdall: {e}")
                     
                     # Process PD LIST entries
                     for pd_entry in pd_list:
@@ -338,34 +323,43 @@ class StorageTopology:
                         
                         model = pd_entry.get("Model", "").strip()
                         
-                        # Try to get detailed information from pdall output or from the entry itself
+                        # Try to get detailed information - query individual drive if not already cached
                         serial = ""
                         manufacturer = ""
                         wwn = ""
                         
-                        # First try to get details from pdall map
-                        pd_detail = pd_details_map.get(str(pid), pd_details_map.get(eid_slt, {}))
-                        if pd_detail:
-                            # Extract serial, manufacturer, WWN from detail structure
-                            # The structure may vary, so check multiple possible locations
-                            if isinstance(pd_detail, dict):
-                                # Check for Device attributes section
-                                for detail_key, detail_value in pd_detail.items():
-                                    if "Device attributes" in detail_key or "Device attributes" == detail_key:
-                                        if isinstance(detail_value, dict):
-                                            serial = detail_value.get("SN", "").strip()
-                                            manufacturer = detail_value.get("Manufacturer Id", "").strip()
-                                            wwn = detail_value.get("WWN", "").strip()
-                                            if not model and detail_value.get("Model Number"):
-                                                model = detail_value.get("Model Number", "").strip()
-                                            break
-                                    # Also check direct fields
-                                    if detail_key == "SN" or detail_key == "Serial Number":
-                                        serial = str(detail_value).strip()
-                                    elif detail_key == "WWN":
-                                        wwn = str(detail_value).strip()
-                                    elif detail_key == "Manufacturer Id" or detail_key == "Manufacturer":
-                                        manufacturer = str(detail_value).strip()
+                        # Check if we already have details for this drive
+                        pd_detail = pd_details_map.get(eid_slt, {})
+                        
+                        if not pd_detail and enclosure and slot:
+                            # Query individual drive for details
+                            try:
+                                detail_output = self._execute_command(
+                                    [self.storcli_cmd, f"/c{controller_num}/e{enclosure}/s{slot}", "show", "all", "J"],
+                                    handle_errors=False
+                                )
+                                detail_json = self._parse_json_output(detail_output, "")
+                                if detail_json:
+                                    # Parse detailed info
+                                    for detail_controller in detail_json.get("Controllers", []):
+                                        detail_response = detail_controller.get("Response Data", {})
+                                        # Look for Device attributes
+                                        for key, value in detail_response.items():
+                                            if "Device attributes" in key or "Device attributes" == key:
+                                                if isinstance(value, dict):
+                                                    pd_details_map[eid_slt] = value
+                                                    pd_detail = value
+                                                    break
+                            except Exception as e:
+                                self.logger.debug(f"Could not get detailed info for {eid_slt}: {e}")
+                        
+                        # Extract serial, manufacturer, WWN from detail structure
+                        if pd_detail and isinstance(pd_detail, dict):
+                            serial = pd_detail.get("SN", "").strip()
+                            manufacturer = pd_detail.get("Manufacturer Id", "").strip()
+                            wwn = pd_detail.get("WWN", "").strip()
+                            if not model and pd_detail.get("Model Number"):
+                                model = pd_detail.get("Model Number", "").strip()
                         
                         # Create drive path name similar to storcli format
                         drive_key = f"/c{controller_num}/e{enclosure}/s{slot}"
