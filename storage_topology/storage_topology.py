@@ -422,7 +422,7 @@ class StorageTopology:
         if self.long_output:
             # Long format: show all available disk information
             headers = ["Device", "Name", "Slot", "Ctrl", "Enc", "Drive",
-                      "Serial", "Model", "Manufacturer", "WWN", "Vendor", "Size",
+                      "Serial", "Model", "Manufacturer", "WWN", "Size",
                       "Enclosure", "PhysSlot", "LogDisk", "Location"]
 
             table_data = []
@@ -438,7 +438,6 @@ class StorageTopology:
                     disk.model,
                     disk.manufacturer,
                     disk.wwn,
-                    disk.vendor,
                     disk.size,
                     disk.enclosure_name,
                     str(disk.physical_slot),
