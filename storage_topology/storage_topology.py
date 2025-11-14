@@ -29,6 +29,7 @@ class StorageTopology:
         # Options
         self.json_output = False
         self.show_zpool = False
+        self.long_output = False
         self.verbose = False
         self.quiet = False
         self.query_disk = None
@@ -77,6 +78,7 @@ class StorageTopology:
 
         parser.add_argument("-j", "--json", action="store_true", help="Output results in JSON format")
         parser.add_argument("-z", "--zpool", action="store_true", help="Display ZFS pool information")
+        parser.add_argument("-l", "--long", action="store_true", help="Display all available disk information")
         parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
         parser.add_argument("-q", "--quiet", action="store_true", help="Suppress INFO messages")
         parser.add_argument("--query", nargs='?', const='all', metavar="DISK_NAME",
@@ -109,6 +111,7 @@ class StorageTopology:
         # Set instance variables
         self.json_output = args.json
         self.show_zpool = args.zpool
+        self.long_output = args.long
         self.verbose = args.verbose
         self.quiet = args.quiet
         self.query_disk = args.query
@@ -416,21 +419,50 @@ class StorageTopology:
 
     def _display_table(self) -> None:
         """Display disks in table format"""
-        headers = ["Device", "Serial", "Model", "Controller", "Enclosure",
-                  "Slot", "Location"]
+        if self.long_output:
+            # Long format: show all available disk information
+            headers = ["Device", "Name", "Slot", "Ctrl", "Enc", "Drive",
+                      "Serial", "Model", "Manufacturer", "WWN", "Vendor", "Size",
+                      "Enclosure", "PhysSlot", "LogDisk", "Location"]
 
-        table_data = []
-        for disk in self.disks:
-            row = [
-                disk.dev_name,
-                disk.serial,
-                disk.model,
-                disk.controller,
-                disk.enclosure_name,
-                str(disk.physical_slot),
-                disk.location
-            ]
-            table_data.append(row)
+            table_data = []
+            for disk in self.disks:
+                row = [
+                    disk.dev_name,
+                    disk.short_name,
+                    f"{disk.enclosure}:{disk.slot}",
+                    disk.controller,
+                    disk.enclosure,
+                    str(disk.slot),
+                    disk.serial,
+                    disk.model,
+                    disk.manufacturer,
+                    disk.wwn,
+                    disk.vendor,
+                    disk.size,
+                    disk.enclosure_name,
+                    str(disk.physical_slot),
+                    str(disk.logical_disk),
+                    disk.location
+                ]
+                table_data.append(row)
+        else:
+            # Short format: show essential information only
+            headers = ["Device", "Serial", "Model", "Controller", "Enclosure",
+                      "Slot", "Location"]
+
+            table_data = []
+            for disk in self.disks:
+                row = [
+                    disk.dev_name,
+                    disk.serial,
+                    disk.model,
+                    disk.controller,
+                    disk.enclosure_name,
+                    str(disk.physical_slot),
+                    disk.location
+                ]
+                table_data.append(row)
 
         self._print_table(headers, table_data)
 
